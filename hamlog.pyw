@@ -1826,8 +1826,9 @@ class POTAHunter(tk.Tk):
                         except (ValueError, TypeError):
                             pass
 
-        active_only_gs = {gs for gs in spot_gs_map if gs not in logged_gs and gs not in tuned_gs}
-        flash_gs = logged_gs & (set(spot_gs_map) - tuned_gs)
+        logged_gs_4 = {gs[:4] for gs in logged_gs}
+        active_only_gs = {gs for gs in spot_gs_map if gs[:4] not in logged_gs_4 and gs not in tuned_gs}
+        flash_gs = {gs for gs in logged_gs if gs[:4] in (set(spot_gs_map) - tuned_gs)}
 
         # ── Draw active-only (orange) ────────────────────────────────────
         for gs in active_only_gs:
