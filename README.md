@@ -38,7 +38,7 @@ A Python-based desktop application for amateur radio operators participating in 
 ### Grid Square Map
 - Maidenhead grid square visualization with world coastlines
 - Interactive hover tooltips
-- Browser-based map export
+- Browser-based map export for high definition interactive map hunting and logging
 
 ### Activator Mode
 - Designated Activator Mode allows for quick logging when activating a park
