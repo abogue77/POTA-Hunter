@@ -31,8 +31,8 @@ A Python-based desktop application for amateur radio operators participating in 
 - Park reference lookup with location data
 - Automatic database updates on launch
 
-### QRZ Callsign Lookup
-- Auto-populates name, location, and grid square via QRZ.com XML API
+### Callsign Lookup
+- Auto-populates name, location, and grid square via optional FCC database download, HAMDB, or QRZ.com XML API
 
 ### Grid Square Map
 - Maidenhead grid square visualization with world coastlines
