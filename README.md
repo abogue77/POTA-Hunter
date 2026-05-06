@@ -10,34 +10,40 @@ A Python-based desktop application for amateur radio operators participating in 
 
 ### Live POTA Spot Monitoring
 - Pulls real-time activator spots from the POTA API
-- Filter spots by band and mode
-- Configurable auto-scan interval
+- Filter spots by band and mode, operator class, ITU Region, and Hide QRT
+- Scan active ststions with configurable auto-scan interval, and skip logged for fast hunting. 
 - Tracks which stations you have already worked
 
 ### Transceiver Control (Flrig)
 - Connects to [Flrig](http://www.w1hkj.com/files/flrig/) via XML-RPC
 - Displays live VFO frequency, mode, and band
 - S-meter and power meter
-- PTT state detection
+- PTT state detection (auto scan stop when detected)
 
 ### QSO Logging
 - UTC timestamp auto-fill
 - Fields for callsign, RST sent/received, park reference, comments, and notes
 - ADIF import and export
 - SQLite-backed fast search, filter, and sort by callsign, band, mode, or date
+- Multi-Op button saves park number for repeat log
 
 ### Park Database
 - Synced from the official POTA parks CSV
 - Park reference lookup with location data
 - Automatic database updates on launch
 
-### QRZ Callsign Lookup
-- Auto-populates name, location, and grid square via QRZ.com XML API
+### Callsign Lookup
+- Auto-populates name, location, and grid square via optional FCC database download, HAMDB, or QRZ.com XML API
 
 ### Grid Square Map
 - Maidenhead grid square visualization with world coastlines
 - Interactive hover tooltips
-- Browser-based map export
+- Browser-based map export for high definition interactive map hunting and logging
+
+### Activator Mode
+- Designated Activator Mode allows for quick logging when activating a park
+- Self-spot feature
+- Call sign database lookup auto fills name and location
 
 ---
 
