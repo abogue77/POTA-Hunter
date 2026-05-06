@@ -124,7 +124,7 @@ A: The current version uses a built-in map renderer. Third-party tile providers 
 
 **Q: Windows Defender blocks the EXE.**
 
-A: As a PyInstaller-built executable from an individual developer, the EXE may trigger SmartScreen on first run. Click **More info → Run anyway** to proceed. You can also run from source (`python hamlog.pyw`) if you prefer to avoid this entirely.
+A: As a PyInstaller-built executable from an individual developer, the EXE may trigger SmartScreen on first run. Click **More info → Run anyway** to proceed. You can also run from source (`python potahunter.pyw`) if you prefer to avoid this entirely.
 
 ---
 

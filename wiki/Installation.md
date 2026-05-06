@@ -16,10 +16,10 @@ POTA Hunter requires **Python 3.6 or later** and uses only Python's standard lib
 
 1. Install [Python 3.6+](https://www.python.org/downloads/) (check **Add Python to PATH** during setup).
 2. Download or clone this repository.
-3. Double-click `hamlog.pyw`, or open a terminal and run:
+3. Double-click `potahunter.pyw`, or open a terminal and run:
 
 ```powershell
-python hamlog.pyw
+python potahunter.pyw
 ```
 
 ---
@@ -35,14 +35,14 @@ bash install.sh
 ```
 
 The installer:
-- Copies the app to `~/.local/share/hamlog/`
-- Creates a launcher at `~/.local/bin/hamlog`
+- Copies the app to `~/.local/share/potahunter/`
+- Creates a launcher at `~/.local/bin/potahunter`
 - Adds a desktop entry for your application menu
 
 After installation, launch with:
 
 ```bash
-hamlog
+potahunter
 ```
 
 ### Prerequisites
@@ -61,7 +61,7 @@ sudo pacman -S python tk
 ### Manual Run (without installing)
 
 ```bash
-python3 hamlog.pyw
+python3 potahunter.pyw
 ```
 
 ---
@@ -74,7 +74,7 @@ brew install python python-tk
 
 git clone https://github.com/abogue77/POTA-Logger.git
 cd POTA-Logger
-python3 hamlog.pyw
+python3 potahunter.pyw
 ```
 
 ---

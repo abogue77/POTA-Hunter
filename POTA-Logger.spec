@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['hamlog.pyw'],
+    ['potahunter.pyw'],
     pathex=[],
     binaries=[],
     datas=[],

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="hamlog"
-INSTALL_DIR="$HOME/.local/share/hamlog"
+APP_NAME="potahunter"
+INSTALL_DIR="$HOME/.local/share/potahunter"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,13 +55,13 @@ echo "Tkinter OK"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR"
 
 # 4. Copy application file
-cp "$SCRIPT_DIR/hamlog.pyw" "$INSTALL_DIR/hamlog.pyw"
-echo "Installed hamlog.pyw -> $INSTALL_DIR/hamlog.pyw"
+cp "$SCRIPT_DIR/potahunter.pyw" "$INSTALL_DIR/potahunter.pyw"
+echo "Installed potahunter.pyw -> $INSTALL_DIR/potahunter.pyw"
 
 # 4b. Install icon
 ICON_SRC="$SCRIPT_DIR/assets/icon.png"
 ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
-ICON_DST="$ICON_DIR/hamlog.png"
+ICON_DST="$ICON_DIR/potahunter.png"
 if [ -f "$ICON_SRC" ]; then
     mkdir -p "$ICON_DIR"
     cp "$ICON_SRC" "$ICON_DST"
@@ -76,13 +76,13 @@ fi
 # 5. Create launcher script
 cat > "$BIN_DIR/$APP_NAME" <<EOF
 #!/usr/bin/env bash
-exec python3 "\$HOME/.local/share/hamlog/hamlog.pyw" "\$@"
+exec python3 "\$HOME/.local/share/potahunter/potahunter.pyw" "\$@"
 EOF
 chmod +x "$BIN_DIR/$APP_NAME"
 echo "Created launcher  -> $BIN_DIR/$APP_NAME"
 
 # 6. Create .desktop file for application menu
-cat > "$DESKTOP_DIR/hamlog.desktop" <<EOF
+cat > "$DESKTOP_DIR/potahunter.desktop" <<EOF
 [Desktop Entry]
 Name=POTA Logger
 Comment=POTA Activator Hunter & Ham Radio Logger
@@ -90,9 +90,9 @@ Exec=$BIN_DIR/$APP_NAME
 Terminal=false
 Type=Application
 Categories=HamRadio;Utility;
-Icon=hamlog
+Icon=potahunter
 EOF
-echo "Created desktop entry -> $DESKTOP_DIR/hamlog.desktop"
+echo "Created desktop entry -> $DESKTOP_DIR/potahunter.desktop"
 
 # Refresh desktop database if the tool is available
 if command -v update-desktop-database &>/dev/null; then
@@ -108,7 +108,7 @@ echo ""
 echo "=== Installation complete! ==="
 echo ""
 echo "To launch POTA Logger:"
-echo "  hamlog"
+echo "  potahunter"
 echo ""
 
 # Warn if ~/.local/bin is not on PATH

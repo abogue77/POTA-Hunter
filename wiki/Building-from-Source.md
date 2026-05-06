@@ -20,12 +20,12 @@ No build step is required to run the app from source.
 
 **Windows:**
 ```powershell
-python hamlog.pyw
+python potahunter.pyw
 ```
 
 **Linux / macOS:**
 ```bash
-python3 hamlog.pyw
+python3 potahunter.pyw
 ```
 
 ---
@@ -66,7 +66,7 @@ The `build\` folder contains intermediate files and can be deleted after a succe
 The `POTA-Logger.spec` file configures the build. Key settings:
 - `onefile = True` — single EXE output
 - `windowed = True` — no console window
-- Entry point: `hamlog.pyw`
+- Entry point: `potahunter.pyw`
 
 ---
 
@@ -79,20 +79,20 @@ bash install.sh
 ```
 
 What it does:
-1. Copies `hamlog.pyw` to `~/.local/share/hamlog/`
-2. Creates a launcher script at `~/.local/bin/hamlog`
+1. Copies `potahunter.pyw` to `~/.local/share/potahunter/`
+2. Creates a launcher script at `~/.local/bin/potahunter`
 3. Writes a `.desktop` entry for the application menu (Linux only)
 
 After installation:
 ```bash
-hamlog
+potahunter
 ```
 
 To uninstall:
 ```bash
-rm -rf ~/.local/share/hamlog/
-rm ~/.local/bin/hamlog
-rm ~/.local/share/applications/hamlog.desktop  # Linux only
+rm -rf ~/.local/share/potahunter/
+rm ~/.local/bin/potahunter
+rm ~/.local/share/applications/potahunter.desktop  # Linux only
 ```
 
 ---
@@ -101,7 +101,7 @@ rm ~/.local/share/applications/hamlog.desktop  # Linux only
 
 ```
 POTA-Logger/
-├── hamlog.pyw           # Entire application — single Python file
+├── potahunter.pyw           # Entire application — single Python file
 ├── POTA-Logger.spec     # PyInstaller build configuration
 ├── build_windows.bat    # Windows build script
 ├── install.sh           # Linux/macOS installer
@@ -111,15 +111,15 @@ POTA-Logger/
     └── POTA-Logger.exe
 ```
 
-All application code is in the single file `hamlog.pyw`. There are no submodules or packages.
+All application code is in the single file `potahunter.pyw`. There are no submodules or packages.
 
 ---
 
 ## Contributing
 
 1. Fork the repository on GitHub.
-2. Make your changes to `hamlog.pyw`.
-3. Test by running `python hamlog.pyw` (or `python3 hamlog.pyw` on Linux/macOS).
+2. Make your changes to `potahunter.pyw`.
+3. Test by running `python potahunter.pyw` (or `python3 potahunter.pyw` on Linux/macOS).
 4. Submit a pull request with a description of your changes.
 
 Please test on Windows if possible before submitting, since the primary release target is the Windows EXE.
