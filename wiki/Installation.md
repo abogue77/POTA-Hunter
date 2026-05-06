@@ -81,10 +81,10 @@ python3 potahunter.pyw
 
 ## Data Storage
 
-On first launch, POTA Hunter creates a `HamLog/` folder in your home directory:
+On first launch, POTA Hunter creates a `POTA-Hunter/` folder in your home directory:
 
 ```
-~/HamLog/
+~/POTA-Hunter/
 ├── config.json        # Your settings (callsign, QRZ, Flrig, etc.)
 ├── pota_parks.db      # Local copy of the POTA parks database
 └── *.adi              # Your ADIF logbook files
@@ -96,7 +96,7 @@ You can back up this folder to preserve all your logs and settings.
 
 ## Updating
 
-**Windows EXE**: Download the new release and replace the old `.exe` file. Your `~/HamLog/` data is untouched.
+**Windows EXE**: Download the new release and replace the old `.exe` file. Your `~/POTA-Hunter/` data is untouched.
 
 **From source**: `git pull` inside the cloned folder, then restart the app.
 

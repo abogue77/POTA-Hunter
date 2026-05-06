@@ -100,8 +100,8 @@ if command -v update-desktop-database &>/dev/null; then
 fi
 
 # 7. Create log/config directory
-mkdir -p "$HOME/HamLog"
-echo "Created log directory  -> $HOME/HamLog"
+mkdir -p "$HOME/POTA-Hunter"
+echo "Created log directory  -> $HOME/POTA-Hunter"
 
 # 8. Summary
 echo ""

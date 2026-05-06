@@ -1,6 +1,6 @@
 # Configuration
 
-All settings are stored in `~/HamLog/config.json` and can be changed through the **Settings** menus in the app. You can also edit the file directly in a text editor while the app is closed.
+All settings are stored in `~/POTA-Hunter/config.json` and can be changed through the **Settings** menus in the app. You can also edit the file directly in a text editor while the app is closed.
 
 ---
 
@@ -102,4 +102,4 @@ Below is the complete structure of `config.json` with all default values.
 
 ## Resetting to Defaults
 
-Close the app, delete `~/HamLog/config.json`, and relaunch. The file will be recreated with all default values. Your logbook files are not affected.
+Close the app, delete `~/POTA-Hunter/config.json`, and relaunch. The file will be recreated with all default values. Your logbook files are not affected.

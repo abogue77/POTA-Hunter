@@ -18,7 +18,7 @@ A: Yes. Flrig integration is optional. Without it, you enter frequency and mode 
 
 **Q: Where are my log files stored?**
 
-A: In `~/HamLog/` — that's `C:\Users\<YourName>\HamLog\` on Windows, or `/home/<yourname>/HamLog/` on Linux/macOS.
+A: In `~/POTA-Hunter/` — that's `C:\Users\<YourName>\POTA-Hunter\` on Windows, or `/home/<yourname>/POTA-Hunter/` on Linux/macOS.
 
 ---
 

@@ -66,4 +66,4 @@ POTA will credit the QSOs to the park references in the `POTA_REF` field.
 
 ## Backup
 
-Your logbook files are stored in `~/HamLog/` alongside `config.json` and the parks database. Back up this entire folder periodically to avoid losing your logs. Cloud storage (OneDrive, Dropbox, Google Drive) works well for keeping an offsite copy.
+Your logbook files are stored in `~/POTA-Hunter/` alongside `config.json` and the parks database. Back up this entire folder periodically to avoid losing your logs. Cloud storage (OneDrive, Dropbox, Google Drive) works well for keeping an offsite copy.

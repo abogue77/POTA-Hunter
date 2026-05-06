@@ -19,7 +19,7 @@ If you don't have a QRZ subscription, you can skip this setup — POTA Hunter wo
 3. Click **Test Login** — POTA Hunter will attempt to authenticate and report success or an error message.
 4. Click **Save**.
 
-Credentials are stored in `~/HamLog/config.json`.
+Credentials are stored in `~/POTA-Hunter/config.json`.
 
 ---
 
@@ -48,7 +48,7 @@ The session key is cached to avoid re-authenticating on every lookup.
 
 ## Privacy Note
 
-Your QRZ username and password are stored in plain text in `~/HamLog/config.json`. Ensure this file is not shared or committed to version control.
+Your QRZ username and password are stored in plain text in `~/POTA-Hunter/config.json`. Ensure this file is not shared or committed to version control.
 
 ---
 

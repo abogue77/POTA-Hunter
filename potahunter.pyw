@@ -31,7 +31,7 @@ import http.server
 import socketserver
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-LOGBOOK_DIR = os.path.join(os.path.expanduser("~"), "HamLog")
+LOGBOOK_DIR = os.path.join(os.path.expanduser("~"), "POTA-Hunter")
 os.makedirs(LOGBOOK_DIR, exist_ok=True)
 CONFIG_FILE   = os.path.join(LOGBOOK_DIR, "config.json")
 PARKS_DB      = os.path.join(LOGBOOK_DIR, "pota_parks.db")
@@ -137,7 +137,7 @@ def parks_db_exists():
         return False
 
 def build_parks_db(progress_cb=None):
-    """Download all_parks_ext.csv and rebuild ~/HamLog/pota_parks.db.
+    """Download all_parks_ext.csv and rebuild ~/POTA-Hunter/pota_parks.db.
     Returns (count, error_string). error_string is None on success.
     Designed to run in a background thread; progress_cb(msg) is thread-safe."""
     import csv, io
@@ -249,7 +249,7 @@ def fcc_db_exists():
         return False
 
 def build_fcc_db(progress_cb=None):
-    """Download l_amat.zip from FCC and build ~/HamLog/fcc_calls.db.
+    """Download l_amat.zip from FCC and build ~/POTA-Hunter/fcc_calls.db.
     Returns (count, error_string). Runs in a background thread; progress_cb is thread-safe."""
     import zipfile, io as _io
     if progress_cb:
@@ -641,7 +641,7 @@ def pota_post_spot(activator, spotter, reference, freq_khz, mode, comment=""):
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "User-Agent":   "HamLog/2.0",
+            "User-Agent":   "POTA-Hunter/2.0",
         },
     )
     try:
@@ -658,7 +658,7 @@ _qrz_session = None
 def qrz_login(user, password):
     global _qrz_session
     url = (f"https://xmldata.qrz.com/xml/current/?username={urllib.parse.quote(user)}"
-           f"&password={urllib.parse.quote(password)}&agent=HamLog2.0")
+           f"&password={urllib.parse.quote(password)}&agent=POTA-Hunter2.0")
     try:
         with urllib.request.urlopen(url, timeout=8) as r:
             tree = ET.parse(r)
@@ -3445,7 +3445,7 @@ function clearLogModal(){
         try:
             req = urllib.request.Request(
                 "https://api.pota.app/spot/activator",
-                headers={"User-Agent": "HamLog/2.0"})
+                headers={"User-Agent": "POTA-Hunter/2.0"})
             with urllib.request.urlopen(req, timeout=12) as r:
                 spots = json.loads(r.read().decode("utf-8"))
             spots.sort(

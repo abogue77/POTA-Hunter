@@ -61,7 +61,7 @@ The POTA parks database is required for grid square lookups and map markers. On 
 
 To update it manually: **File → Update Parks DB**
 
-This downloads `all_parks_ext.csv` from pota.app (~1 MB) and builds a local SQLite index at `~/HamLog/pota_parks.db`.
+This downloads `all_parks_ext.csv` from pota.app (~1 MB) and builds a local SQLite index at `~/POTA-Hunter/pota_parks.db`.
 
 ---
 

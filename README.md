@@ -98,7 +98,7 @@ cd POTA-Hunter
 ./install.sh
 ```
 
-The installer supports apt, dnf, pacman, and zypper. It installs the app to `~/.local/share/potahunter/`, adds a launcher to `~/.local/bin/`, and creates a desktop entry. Logs are stored in `~/HamLog/`.
+The installer supports apt, dnf, pacman, and zypper. It installs the app to `~/.local/share/potahunter/`, adds a launcher to `~/.local/bin/`, and creates a desktop entry. Logs are stored in `~/POTA-Hunter/`.
 
 ### Run from Source (any platform)
 

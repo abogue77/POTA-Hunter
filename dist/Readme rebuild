@@ -4,11 +4,11 @@ dist\POTA-Logger.exe — 13 MB, fully self-contained Windows executable. No Pyth
 
 What was created:
 
-build_windows.bat — double-click script to rebuild the exe anytime (e.g., after updating hamlog.pyw)
+build_windows.bat — double-click script to rebuild the exe anytime (e.g., after updating potahunter.pyw)
 dist\POTA-Logger.exe — the distributable file to share with other users
 POTA-Logger.spec — PyInstaller spec file (can be used for reproducible rebuilds)
 build\ — intermediate build artifacts (can be deleted, not needed for distribution)
-To distribute: just share dist\POTA-Logger.exe. When users run it the first time, it will automatically create ~/HamLog/ and download the parks database as normal.
+To distribute: just share dist\POTA-Logger.exe. When users run it the first time, it will automatically create ~/POTA-Hunter/ and download the parks database as normal.
 
 To rebuild after code changes: run build_windows.bat again from the project folder.
 
