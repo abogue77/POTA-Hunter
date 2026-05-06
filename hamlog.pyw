@@ -14,6 +14,7 @@ Storage  : ADIF (.adi) is the primary on-disk format per logbook.
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import sqlite3
+import subprocess
 import xmlrpc.client
 import urllib.request
 import urllib.parse
@@ -34,7 +35,12 @@ LOGBOOK_DIR = os.path.join(os.path.expanduser("~"), "HamLog")
 os.makedirs(LOGBOOK_DIR, exist_ok=True)
 CONFIG_FILE   = os.path.join(LOGBOOK_DIR, "config.json")
 PARKS_DB      = os.path.join(LOGBOOK_DIR, "pota_parks.db")
+FCC_DB        = os.path.join(LOGBOOK_DIR, "fcc_calls.db")
 PARKS_CSV_URL = "https://pota.app/all_parks_ext.csv"
+FCC_ZIP_URLS  = [
+    "https://data.fcc.gov/download/pub/uls/complete/l_amat.zip",   # official
+    "http://www.nc7j.com/downloads/AR6/fcc/complete/l_amat.zip",   # community mirror
+]
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -49,12 +55,17 @@ DEFAULT_CONFIG = {
     "pota_band":              "All",
     "pota_mode":              "All",
     "pota_hide_qrt":          False,
+    "pota_hide_oob":          False,
     "pota_itu_r1":            True,
     "pota_itu_r2":            True,
     "pota_itu_r3":            True,
     "pota_respot_enabled":    False,
     "pota_scan_skip_worked":  False,
     "pota_scan_interval":     15,
+    "fcc_db_date":            "",
+    "license_class":          "Extra",
+    "flrig_autostart":        False,
+    "flrig_exe_path":         "",
 }
 
 def load_config():
@@ -226,6 +237,156 @@ def lookup_park(reference):
     except Exception:
         return None
 
+# ── FCC Callsign DB ───────────────────────────────────────────────────────────
+def fcc_db_exists():
+    if not os.path.exists(FCC_DB):
+        return False
+    try:
+        with sqlite3.connect(FCC_DB) as cx:
+            n = cx.execute("SELECT COUNT(*) FROM callsigns").fetchone()[0]
+        return n > 0
+    except Exception:
+        return False
+
+def build_fcc_db(progress_cb=None):
+    """Download l_amat.zip from FCC and build ~/HamLog/fcc_calls.db.
+    Returns (count, error_string). Runs in a background thread; progress_cb is thread-safe."""
+    import zipfile, io as _io
+    if progress_cb:
+        progress_cb("Connecting to FCC database server…")
+    raw = None
+    last_err = ""
+    for url in FCC_ZIP_URLS:
+        source = "FCC" if "fcc.gov" in url else "mirror"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "POTA-Hunter/2.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                chunks = []
+                received = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    received += len(chunk)
+                    if progress_cb:
+                        if total:
+                            pct = received * 100 // total
+                            progress_cb(
+                                f"Downloading FCC database ({source})…  "
+                                f"{received/1_048_576:.1f} / {total/1_048_576:.1f} MB  ({pct}%)")
+                        else:
+                            progress_cb(
+                                f"Downloading FCC database ({source})…  "
+                                f"{received/1_048_576:.1f} MB received")
+            raw = b"".join(chunks)
+            break  # success
+        except Exception as e:
+            last_err = str(e)
+            if progress_cb:
+                progress_cb(f"{source} unavailable ({e}) — trying next source…")
+    if raw is None:
+        return 0, f"Download failed from all sources: {last_err}"
+
+    if progress_cb:
+        progress_cb("Parsing FCC data files…")
+    try:
+        zf = zipfile.ZipFile(_io.BytesIO(raw))
+
+        # HD.dat: pipe-delimited, field[4]=callsign, field[5]=status (A=Active)
+        active = set()
+        with zf.open("HD.dat") as f:
+            for line in f:
+                parts = line.decode("latin-1").rstrip("\r\n").split("|")
+                if len(parts) > 5 and parts[5] == "A":
+                    active.add(parts[4].upper())
+
+        # AM.dat: pipe-delimited, field[4]=callsign, field[5]=operator class (E/G/A/T/N/P)
+        classes = {}
+        with zf.open("AM.dat") as f:
+            for line in f:
+                parts = line.decode("latin-1").rstrip("\r\n").split("|")
+                if len(parts) > 5 and parts[4]:
+                    classes[parts[4].upper()] = parts[5]
+
+        # EN.dat: pipe-delimited, field[4]=callsign, [7]=entity name (clubs),
+        #         [8]=first, [10]=last, [15]=addr, [16]=city, [17]=state, [18]=zip
+        rows = []
+        with zf.open("EN.dat") as f:
+            for line in f:
+                parts = line.decode("latin-1").rstrip("\r\n").split("|")
+                if len(parts) < 19:
+                    continue
+                call = parts[4].upper()
+                if not call or call not in active:
+                    continue
+                first  = parts[8].strip()
+                last   = parts[10].strip()
+                entity = parts[7].strip()
+                if not first and not last and entity:
+                    first = entity
+                rows.append((
+                    call,
+                    first,
+                    last,
+                    parts[15].strip(),
+                    parts[16].strip(),
+                    parts[17].strip(),
+                    parts[18].strip(),
+                    classes.get(call, ""),
+                ))
+    except Exception as e:
+        return 0, f"Parse failed: {e}"
+
+    if not rows:
+        return 0, "No active licensee records found in FCC data."
+
+    if progress_cb:
+        progress_cb(f"Writing {len(rows):,} callsigns to DB…")
+    try:
+        with sqlite3.connect(FCC_DB) as cx:
+            cx.execute("DROP TABLE IF EXISTS callsigns")
+            cx.execute("""
+                CREATE TABLE callsigns (
+                    call       TEXT PRIMARY KEY,
+                    first_name TEXT,
+                    last_name  TEXT,
+                    addr1      TEXT,
+                    city       TEXT,
+                    state      TEXT,
+                    zip        TEXT,
+                    lic_class  TEXT
+                )
+            """)
+            cx.execute("CREATE INDEX IF NOT EXISTS idx_fcc_call ON callsigns(call)")
+            cx.executemany("INSERT OR REPLACE INTO callsigns VALUES (?,?,?,?,?,?,?,?)", rows)
+    except Exception as e:
+        return 0, f"DB write failed: {e}"
+
+    if progress_cb:
+        progress_cb(f"FCC database ready — {len(rows):,} callsigns.")
+    return len(rows), None
+
+def fcc_lookup(call):
+    """Look up a callsign in the local FCC database. Thread-safe."""
+    if not os.path.exists(FCC_DB):
+        return None
+    try:
+        with sqlite3.connect(FCC_DB) as cx:
+            row = cx.execute(
+                "SELECT first_name,last_name,addr1,city,state,lic_class "
+                "FROM callsigns WHERE call=?",
+                (call.upper(),)).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    fn, ln, addr, city, state, cls = row
+    name = f"{fn} {ln}".strip()
+    qth  = f"{city}, {state}".strip(", ")
+    return {"name": name, "qth": qth, "class": cls, "source": "FCC"}
+
 # ── ADIF helpers ──────────────────────────────────────────────────────────────
 def adif_field(tag, val):
     if val is None or str(val).strip() == "":
@@ -310,6 +471,7 @@ def adif_to_row_dict(d):
 
 def load_adif_into_index(adif_path, conn):
     conn.execute("DELETE FROM qso")
+    conn.execute("DELETE FROM sqlite_sequence WHERE name='qso'")
     conn.commit()
     if not os.path.exists(adif_path):
         return 0
@@ -352,6 +514,37 @@ def freq_to_band(freq_mhz):
         if lo <= f <= hi:
             return band
     return ""
+
+# ── US Amateur Band Plan (FCC Part 97, MHz) ───────────────────────────────────
+# Phone/SSB/AM/FM sub-band privileges by license class
+_US_PHONE_BANDS = {
+    "Extra":      [(1.800,2.000),(3.600,4.000),(5.3305,5.4035),(7.125,7.300),
+                   (14.150,14.350),(18.110,18.168),(21.200,21.450),(24.930,24.990),
+                   (28.000,29.700),(50.0,54.0),(144.0,148.0),(420.0,450.0)],
+    "General":    [(1.843,2.000),(3.800,4.000),(5.3305,5.4035),(7.175,7.300),
+                   (14.225,14.350),(18.110,18.168),(21.275,21.450),(24.930,24.990),
+                   (28.300,29.700),(50.0,54.0),(144.0,148.0),(420.0,450.0)],
+    "Technician": [(28.300,29.700),(50.0,54.0),(144.0,148.0),(420.0,450.0)],
+}
+# CW/digital sub-band privileges (broader than phone)
+_US_CW_BANDS = {
+    "Extra":      [(1.800,2.000),(3.500,4.000),(5.3305,5.4035),(7.000,7.300),
+                   (10.100,10.150),(14.000,14.350),(18.068,18.168),(21.000,21.450),
+                   (24.890,24.990),(28.000,29.700),(50.0,54.0),(144.0,148.0),(420.0,450.0)],
+    "General":    [(1.800,2.000),(3.525,4.000),(5.3305,5.4035),(7.025,7.300),
+                   (10.100,10.150),(14.025,14.350),(18.068,18.168),(21.025,21.450),
+                   (24.890,24.990),(28.000,29.700),(50.0,54.0),(144.0,148.0),(420.0,450.0)],
+    "Technician": [(3.525,3.600),(7.025,7.125),(21.025,21.200),(28.000,29.700),
+                   (50.0,54.0),(144.0,148.0),(420.0,450.0)],
+}
+_PHONE_MODES = {"SSB","USB","LSB","AM","FM","FMN","PHONE"}
+
+def _in_band(freq_mhz, license_class, mode=""):
+    plan = _US_PHONE_BANDS if mode.strip().upper() in _PHONE_MODES else _US_CW_BANDS
+    ranges = plan.get(license_class)
+    if not ranges:
+        return True
+    return any(lo <= freq_mhz <= hi for lo, hi in ranges)
 
 # ── Flrig ─────────────────────────────────────────────────────────────────────
 class _TimeoutTransport(xmlrpc.client.Transport):
@@ -402,6 +595,31 @@ def flrig_set_freq(host, port, freq_hz):
             transport=_TimeoutTransport(timeout=5.0),
             allow_none=True)
         proxy.rig.set_vfo(float(freq_hz))
+        return True
+    except Exception as e:
+        return str(e)
+
+def ssb_mode_for_freq(freq_hz):
+    """Return 'LSB' for HF below 10 MHz, 'USB' at 10 MHz and above.
+    60m (5.3305–5.4035 MHz) is USB by FCC regulation despite being below 10 MHz."""
+    mhz = float(freq_hz) / 1_000_000
+    if 5.3305 <= mhz <= 5.4035:
+        return "USB"
+    return "USB" if mhz >= 10.0 else "LSB"
+
+def flrig_set_freq_and_mode(host, port, freq_hz, spot_mode=""):
+    """Set VFO frequency and, for SSB spots, auto-select LSB/USB.
+    Returns True on success or an error string on failure."""
+    try:
+        proxy = xmlrpc.client.ServerProxy(
+            f"http://{host}:{port}/RPC2",
+            transport=_TimeoutTransport(timeout=5.0),
+            allow_none=True)
+        proxy.rig.set_vfo(float(freq_hz))
+        norm = spot_mode.strip().upper()
+        if norm in ("SSB", "USB", "LSB", ""):
+            mode = ssb_mode_for_freq(freq_hz)
+            proxy.rig.set_mode(mode)
         return True
     except Exception as e:
         return str(e)
@@ -468,6 +686,31 @@ def qrz_lookup(call):
         return {"name": f"{g('fname')} {g('name')}".strip(),
                 "qth":  f"{g('addr2')}, {g('country')}".strip(", "),
                 "grid": g("grid")}
+    except Exception:
+        return None
+
+def hamdb_lookup(call):
+    """Look up a callsign via the free HamDB.org API. No auth required."""
+    url = f"http://api.hamdb.org/{urllib.parse.quote(call.upper())}/json/POTA-Hunter"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "POTA-Hunter/2.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())["hamdb"]["callsign"]
+        if data.get("call", "").upper() == "NOT_FOUND":
+            return None
+        fname = data.get("fname", "")
+        lname = data.get("name", "")
+        name  = f"{fname} {lname}".strip()
+        city  = data.get("addr2", "")
+        state = data.get("state", "")
+        qth   = f"{city}, {state}".strip(", ")
+        return {
+            "name":   name,
+            "qth":    qth,
+            "grid":   data.get("grid", ""),
+            "class":  data.get("class", ""),
+            "source": "HamDB",
+        }
     except Exception:
         return None
 
@@ -1064,6 +1307,13 @@ def lat_lon_to_itu_region(lat, lon):
         return 3
 
 # ══════════════════════════════════════════════════════════════════════════════
+def _resource(relative):
+    """Resolve path to a bundled resource (works both frozen and from source)."""
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative)
+
+
 class POTAHunter(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1071,6 +1321,10 @@ class POTAHunter(tk.Tk):
         self.configure(bg=BG)
         self.minsize(1000, 640)
         self.resizable(True, True)
+        try:
+            self.iconbitmap(_resource(os.path.join("assets", "icon.ico")))
+        except Exception:
+            pass
 
         self.cfg           = load_config()
         self.conn          = make_index()
@@ -1090,9 +1344,11 @@ class POTAHunter(tk.Tk):
         self._pota_spots_filtered = []
         self._freq_check_var    = tk.StringVar()
         self._freq_check_border = None
+        self._freq_check_label  = None
         self._pota_band_var  = tk.StringVar(value=self.cfg.get("pota_band", "All"))
         self._pota_mode_var  = tk.StringVar(value=self.cfg.get("pota_mode", "All"))
         self._pota_hide_qrt  = tk.BooleanVar(value=self.cfg.get("pota_hide_qrt", False))
+        self._pota_hide_oob  = tk.BooleanVar(value=self.cfg.get("pota_hide_oob", False))
         self._pota_itu_r1    = tk.BooleanVar(value=self.cfg.get("pota_itu_r1", True))
         self._pota_itu_r2    = tk.BooleanVar(value=self.cfg.get("pota_itu_r2", True))
         self._pota_itu_r3    = tk.BooleanVar(value=self.cfg.get("pota_itu_r3", True))
@@ -1100,6 +1356,8 @@ class POTAHunter(tk.Tk):
         self._pota_scan_active       = False
         self._pota_scan_idx          = 0
         self._pota_scan_after_id     = None
+        self._scan_paused_by_map     = False
+        self._flrig_ptt              = False
         self._pota_scan_interval     = tk.IntVar(value=self.cfg.get("pota_scan_interval", 15))
         self._pota_scan_skip_worked  = tk.BooleanVar(value=self.cfg.get("pota_scan_skip_worked", False))
         self._pota_spot_ctx          = None
@@ -1129,7 +1387,7 @@ class POTAHunter(tk.Tk):
         self._map_beam_id       = None
         self._map_beam_phase    = 0
         self._map_my_px         = None
-        self._map_tuned_px      = None
+        self._map_tuned_pxs     = []
 
         self._style_ttk()
         self._build_menu()
@@ -1144,8 +1402,12 @@ class POTAHunter(tk.Tk):
         if self.cfg["qrz_user"] and self.cfg["qrz_pass"]:
             threading.Thread(target=self._qrz_login_bg, daemon=True).start()
 
+        self._flrig_proc = None
+        self._flrig_proc_owned = False
         self._start_flrig_poll()
+        self._maybe_start_flrig()
         self.after(1500, self._check_parks_db_on_startup)
+        self.after(2000, self._check_fcc_db_on_startup)
 
     # ── TTK style ─────────────────────────────────────────────────────────
     def _style_ttk(self):
@@ -1201,6 +1463,10 @@ class POTAHunter(tk.Tk):
         sm.add_command(label="Save Filter Settings", command=self._save_filter_settings)
         sm.add_separator()
         sm.add_command(label="Update POTA Parks DB…", command=self._update_parks_db)
+        fcc_date = self.cfg.get("fcc_db_date", "")
+        fcc_label = (f"Update FCC Callsign DB… (last: {fcc_date})"
+                     if fcc_date else "Download FCC Callsign DB…")
+        sm.add_command(label=fcc_label, command=self._update_fcc_db)
         sm.add_separator()
         theme_label = ("☀ Switch to Light Mode"
                        if self.cfg.get("theme", "dark") == "dark"
@@ -1560,8 +1826,9 @@ class POTAHunter(tk.Tk):
                         except (ValueError, TypeError):
                             pass
 
-        active_only_gs = {gs for gs in spot_gs_map if gs not in logged_gs and gs not in tuned_gs}
-        flash_gs = logged_gs & (set(spot_gs_map) - tuned_gs)
+        logged_gs_4 = {gs[:4] for gs in logged_gs}
+        active_only_gs = {gs for gs in spot_gs_map if gs[:4] not in logged_gs_4 and gs not in tuned_gs}
+        flash_gs = {gs for gs in logged_gs if gs[:4] in (set(spot_gs_map) - tuned_gs)}
 
         # ── Draw active-only (orange) ────────────────────────────────────
         for gs in active_only_gs:
@@ -1622,7 +1889,7 @@ class POTAHunter(tk.Tk):
             self._map_marker_items[gs] = [inner]
 
         # ── Draw tuned (blue) ────────────────────────────────────────────
-        self._map_tuned_px = None
+        self._map_tuned_pxs = []
         for gs in tuned_gs:
             lat, lon = grid_to_latlon(gs)
             if lat is None:
@@ -1639,8 +1906,7 @@ class POTAHunter(tk.Tk):
                 label_parts.append(f"×{qso_info[gs]['cnt']} QSO")
             self._map_markers[(round(x), round(y))] = (
                 f"{' | '.join(label_parts)}  [{gs}]  tuned")
-            if self._map_tuned_px is None:
-                self._map_tuned_px = (x, y)
+            self._map_tuned_pxs.append((x, y))
 
         # ── User's own grid (red diamond) ───────────────────────────────
         self._map_my_px = None
@@ -1664,7 +1930,7 @@ class POTAHunter(tk.Tk):
         self._map_spot_flash_grids = active_only_gs
         if active_only_gs and not self._map_spot_flash_id:
             self._map_spot_flash_tick()
-        if self._map_my_px and self._map_tuned_px:
+        if self._map_my_px and self._map_tuned_pxs:
             self._start_map_beam()
         else:
             self._stop_map_beam()
@@ -1837,30 +2103,29 @@ class POTAHunter(tk.Tk):
         import math
         canvas = self._map_canvas
         canvas.delete("beam_line")
-        if not self._map_my_px or not self._map_tuned_px:
+        if not self._map_my_px or not self._map_tuned_pxs:
             self._map_beam_id = None
             return
         x1, y1 = self._map_my_px
-        x2, y2 = self._map_tuned_px
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.hypot(dx, dy)
-        if length < 1:
-            self._map_beam_id = None
-            return
         step = 12
         dash_len = 6
         phase_offset = (self._map_beam_phase * 2) % step
-        d = phase_offset
-        while d < length:
-            d2 = min(d + dash_len, length)
-            lx1 = x1 + dx / length * d
-            ly1 = y1 + dy / length * d
-            lx2 = x1 + dx / length * d2
-            ly2 = y1 + dy / length * d2
-            canvas.create_line(lx1, ly1, lx2, ly2,
-                               fill=POTA_TUNED, width=2, tags="beam_line")
-            d += step
+        for (x2, y2) in self._map_tuned_pxs:
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.hypot(dx, dy)
+            if length < 1:
+                continue
+            d = phase_offset
+            while d < length:
+                d2 = min(d + dash_len, length)
+                lx1 = x1 + dx / length * d
+                ly1 = y1 + dy / length * d
+                lx2 = x1 + dx / length * d2
+                ly2 = y1 + dy / length * d2
+                canvas.create_line(lx1, ly1, lx2, ly2,
+                                   fill=POTA_TUNED, width=2, tags="beam_line")
+                d += step
         self._map_beam_phase = (self._map_beam_phase + 1) % 6
         self._map_beam_id = self.after(80, self._map_beam_tick)
 
@@ -1891,15 +2156,16 @@ class POTAHunter(tk.Tk):
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <title>POTA Hunter — Live Map</title>
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root{--red:#ff2020;--red-dim:#8b0000;--amber:#ff9900;--green:#00ff88;--cyan:#00e5ff;--bg:#030609;--panel:#070d12;--border:#1a3040;--text:#c8dde8;--dim:#3a5060;}
 :root.day-mode{--red:#990000;--red-dim:#6a1010;--amber:#7a3d00;--green:#004d22;--cyan:#003d77;--bg:#dfe6ed;--panel:#b8c8d8;--border:#4a7090;--text:#080e14;--dim:#2a4860;}
 *{margin:0;padding:0;box-sizing:border-box;}
-html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'Share Tech Mono',monospace;}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'Roboto Mono',Consolas,monospace;}
 body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);}
 .day-mode body::before{display:none;}
 header{height:62px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;border-bottom:1px solid var(--red);background:linear-gradient(90deg,#0a0002,#0d0008,#0a0002);position:relative;z-index:1000;flex-shrink:0;}
@@ -1937,7 +2203,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 .spot-item.tuned:hover{background:rgba(0,229,255,.09);}
 .spot-item.worked{border-left-color:#00bb44;}
 .spot-item.worked:hover{background:rgba(0,187,68,.07);}
-.spot-call{font-family:'Orbitron',sans-serif;font-size:.72rem;color:var(--cyan);text-shadow:0 0 6px rgba(0,229,255,.4);display:flex;align-items:center;justify-content:space-between;}
+.spot-call{font-family:'Roboto Mono',Consolas,monospace;font-size:.72rem;color:var(--cyan);text-shadow:0 0 6px rgba(0,229,255,.4);display:flex;align-items:center;justify-content:space-between;}
 .spot-badge{font-size:.52rem;letter-spacing:1px;padding:1px 5px;border:1px solid currentColor;}
 .spot-badge.tuned{color:var(--cyan);}
 .spot-badge.worked{color:#00bb44;}
@@ -1947,7 +2213,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 .beam-anim{animation:beam-flow 0.9s linear infinite;}
 @keyframes beam-flow{to{stroke-dashoffset:-20;}}
 @keyframes spot-flash{0%,100%{opacity:1}50%{opacity:0.1}}
-.spot-flash{animation:spot-flash 1.5s ease-in-out infinite;}
+.spot-flash{animation:spot-flash 2.5s ease-in-out infinite;}
 ::-webkit-scrollbar{width:3px;}
 ::-webkit-scrollbar-thumb{background:var(--red-dim);}
 #scan-btn{cursor:pointer;font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:2px;padding:4px 12px;border:1px solid currentColor;transition:all .2s;user-select:none;}
@@ -1956,11 +2222,15 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 #scan-overlay{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:1000;font-family:'Orbitron',sans-serif;font-size:.85rem;letter-spacing:4px;color:#00e5ff;text-shadow:0 0 12px #00e5ff;background:rgba(3,6,9,.8);padding:4px 18px;border:1px solid #00e5ff;pointer-events:none;display:none;white-space:nowrap;}
 #scan-dots{display:inline-block;width:2ch;text-align:left;}
 .stn-box{border:1px solid;padding:7px 10px;margin-top:3px;flex-shrink:0;}
-.stn-box.logged{border-color:#00ff88;background:rgba(0,255,136,.04);}
-.stn-box.tuned-s{border-color:#00e5ff;background:rgba(0,229,255,.04);}
-.stn-call{font-family:'Orbitron',sans-serif;font-size:.72rem;letter-spacing:1px;}
-.stn-call.logged{color:#00ff88;text-shadow:0 0 6px rgba(0,255,136,.4);}
-.stn-call.tuned-s{color:#00e5ff;text-shadow:0 0 6px rgba(0,229,255,.4);}
+.stn-box.logged{border-color:var(--green);background:rgba(0,255,136,.04);}
+.stn-box.tuned-s{border-color:var(--cyan);background:rgba(0,229,255,.04);}
+.stn-call{font-family:'Roboto Mono',Consolas,monospace;font-size:.72rem;letter-spacing:1px;}
+.stn-call.logged{color:var(--green);text-shadow:0 0 6px rgba(0,255,136,.4);}
+.stn-call.tuned-s{color:var(--cyan);text-shadow:0 0 6px rgba(0,229,255,.4);}
+.day-mode .stn-box.logged{background:rgba(0,77,34,.08);}
+.day-mode .stn-call.logged{text-shadow:none;}
+.day-mode .stn-box.tuned-s{background:rgba(0,61,119,.08);}
+.day-mode .stn-call.tuned-s{text-shadow:none;}
 .stn-detail{font-size:.56rem;color:var(--dim);margin-top:3px;line-height:1.7;}
 .stn-detail span{display:block;}
 #radar-btn{cursor:pointer;font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:2px;padding:4px 12px;border:1px solid currentColor;transition:all .2s;user-select:none;margin-left:8px;}
@@ -1969,20 +2239,20 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 #log-modal-overlay{position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.82);
   display:none;align-items:center;justify-content:center;}
 #log-modal{background:var(--panel);border:1px solid var(--cyan);padding:22px 26px;width:340px;
-  font-family:'Share Tech Mono',monospace;position:relative;
+  font-family:'Roboto Mono',Consolas,monospace;position:relative;
   box-shadow:0 0 40px rgba(0,229,255,.18);}
 #log-modal.activator-mode{width:460px;padding:26px 32px;}
 #log-modal::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--cyan);}
-.lm-title{font-family:'Orbitron',sans-serif;font-size:.75rem;letter-spacing:3px;color:var(--cyan);
+.lm-title{font-family:'Orbitron',sans-serif;font-size:.9rem;letter-spacing:3px;color:var(--cyan);
   margin-bottom:16px;text-transform:uppercase;text-shadow:0 0 10px rgba(0,229,255,.5);}
-.activator-mode .lm-title{font-size:.9rem;}
+.activator-mode .lm-title{font-size:1.05rem;}
 .lm-row{display:flex;flex-direction:column;gap:3px;margin-bottom:11px;}
-.lm-label{font-size:.55rem;letter-spacing:2px;color:var(--dim);text-transform:uppercase;}
-.activator-mode .lm-label{font-size:.65rem;}
+.lm-label{font-size:.7rem;letter-spacing:2px;color:var(--dim);text-transform:uppercase;}
+.activator-mode .lm-label{font-size:.82rem;}
 .lm-input{background:rgba(0,229,255,.04);border:1px solid var(--border);color:var(--text);
-  font-family:'Share Tech Mono',monospace;font-size:.8rem;padding:5px 8px;outline:none;width:100%;
+  font-family:'Roboto Mono',Consolas,monospace;font-size:.9rem;padding:5px 8px;outline:none;width:100%;
   box-sizing:border-box;transition:border-color .15s;}
-.activator-mode .lm-input{font-size:.95rem;padding:7px 10px;}
+.activator-mode .lm-input{font-size:1.05rem;padding:7px 10px;}
 .lm-input:focus{border-color:var(--cyan);box-shadow:0 0 6px rgba(0,229,255,.2);}
 .lm-input[readonly]{color:var(--dim);cursor:default;}
 .lm-row-2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
@@ -1997,6 +2267,11 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 .lm-btn.selfspot{color:var(--amber);border-color:#7a5000;}
 .lm-btn.selfspot:hover{background:rgba(255,153,0,.1);box-shadow:0 0 8px rgba(255,153,0,.15);}
 .lm-btn.selfspot:disabled{opacity:.35;cursor:not-allowed;}
+.lm-btn.clear{color:var(--cyan);border-color:#005a6e;}
+.lm-btn.clear:hover{background:rgba(0,229,255,.08);box-shadow:0 0 8px rgba(0,229,255,.1);}
+.lm-btn.multiop{color:#cc88ff;border-color:#5a2080;}
+.lm-btn.multiop:hover{background:rgba(200,100,255,.08);box-shadow:0 0 8px rgba(200,100,255,.1);}
+.lm-btn.multiop:disabled{opacity:.35;cursor:not-allowed;}
 #lm-status{font-size:.6rem;letter-spacing:1px;min-height:1.4em;text-align:center;margin-top:8px;}
 #lm-status.ok{color:var(--green);}
 #lm-status.err{color:#ff4040;}
@@ -2006,6 +2281,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 #ts-log-btn:hover{background:rgba(0,229,255,.1);box-shadow:0 0 8px rgba(0,229,255,.15);}
 .stn-box.tuned-s{cursor:pointer;}
 .stn-box.tuned-s:hover{background:rgba(0,229,255,.08);box-shadow:0 0 8px rgba(0,229,255,.1);}
+.day-mode .stn-box.tuned-s:hover{background:rgba(0,61,119,.12);box-shadow:0 0 8px rgba(0,61,119,.2);}
 .spot-item .spot-dbl-hint{font-size:.48rem;color:var(--dim);letter-spacing:1px;
   margin-top:2px;opacity:0;transition:opacity .2s;}
 .spot-item:hover .spot-dbl-hint{opacity:1;}
@@ -2025,7 +2301,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
   background:rgba(0,229,255,.03);display:none;}
 .respot-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;}
 .respot-input{flex:1;background:rgba(0,229,255,.04);border:1px solid var(--border);
-  color:var(--text);font-family:'Share Tech Mono',monospace;font-size:.75rem;
+  color:var(--text);font-family:'Roboto Mono',Consolas,monospace;font-size:.75rem;
   padding:4px 7px;outline:none;transition:border-color .15s;}
 .respot-input:focus{border-color:var(--cyan);}
 .respot-go{font-family:'Orbitron',sans-serif;font-size:.5rem;letter-spacing:1px;
@@ -2036,6 +2312,42 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 #respot-status{font-size:.55rem;letter-spacing:1px;min-height:1.2em;}
 #respot-status.ok{color:var(--green);}
 #respot-status.err{color:#ff4040;}
+/* ── Day-mode readability overrides ─────────────────────────── */
+.day-mode .card{background:rgba(255,255,255,.5);}
+.day-mode .card-value{text-shadow:none;}
+.day-mode .spot-item{background:rgba(255,255,255,.4);}
+.day-mode .spot-item:hover{background:rgba(0,61,119,.1);box-shadow:none;}
+.day-mode .spot-item.tuned{background:rgba(0,61,119,.1);}
+.day-mode .spot-item.tuned:hover{background:rgba(0,61,119,.15);}
+.day-mode .spot-call{text-shadow:none;}
+.day-mode .lm-input{background:#fff;}
+.day-mode .lm-input:focus{box-shadow:0 0 4px rgba(0,61,119,.35);}
+.day-mode .respot-input{background:#fff;}
+.day-mode #respot-panel{background:rgba(255,255,255,.35);}
+.day-mode #log-modal{box-shadow:0 4px 24px rgba(0,0,0,.28);}
+.day-mode .lm-title{text-shadow:none;}
+.day-mode .logo{text-shadow:none;}
+.day-mode #scan-btn.active{text-shadow:none;}
+.day-mode #radar-btn.on{text-shadow:none;}
+.day-mode .mode-btn{box-shadow:none;}
+.day-mode #respot-btn:hover{border-color:var(--cyan);color:var(--cyan);}
+.day-mode #scan-overlay{background:rgba(220,230,240,.92);color:var(--cyan);border-color:var(--cyan);text-shadow:none;}
+.day-mode .spot-item.worked{border-left-color:#1a6600;}
+.day-mode .spot-item.worked:hover{background:rgba(26,102,0,.12);}
+.day-mode .spot-badge.worked{color:#1a6600;font-weight:bold;}
+/* ── VFO display ─────────────────────────────────────────────── */
+#vfo-display{transition:color .4s;font-size:.85rem;color:var(--dim);}
+#vfo-display.live{color:var(--green);font-size:1.1rem;text-shadow:0 0 6px rgba(0,255,136,.4);}
+.day-mode #vfo-display.live{font-size:.85rem;text-shadow:none;}
+/* ── Activator banner ────────────────────────────────────────── */
+#activator-banner{display:none;position:absolute;top:28px;left:0;right:0;
+  text-align:center;font-family:'Orbitron',sans-serif;font-size:2.2rem;font-weight:900;
+  letter-spacing:8px;color:#ff2020;
+  text-shadow:0 0 30px rgba(255,32,32,.9),0 0 60px rgba(255,32,32,.5);
+  user-select:none;pointer-events:none;}
+.day-mode #activator-banner{text-shadow:none;color:#990000;}
+@keyframes banner-flash{0%{opacity:1;}49%{opacity:1;}50%{opacity:0;}99%{opacity:0;}100%{opacity:1;}}
+.banner-flashing{animation:banner-flash 1s linear 3 forwards;}
 </style>
 </head>
 <body>
@@ -2045,6 +2357,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
     <span><span class="status-dot offline" id="status-dot"></span><span id="status-text">OFFLINE</span></span>
     <span id="clock">--:--:-- ZULU</span>
     <span id="mycall" style="color:var(--cyan);font-family:'Orbitron',sans-serif;font-size:.95rem;letter-spacing:3px;"></span>
+    <span id="vfo-display" style="font-family:'Orbitron',sans-serif;letter-spacing:2px;">— · —</span>
   </div>
   <div style="display:flex;align-items:center;gap:0;">
     <div id="scan-btn" class="paused">⏸ SCAN PAUSED</div>
@@ -2103,6 +2416,9 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
   </div>
   <div class="map-area">
     <div id="scan-overlay">SCANNING<span id="scan-dots">.</span></div>
+    <div id="oob-overlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;">
+      <div style="font-family:'Orbitron',sans-serif;font-size:2rem;letter-spacing:6px;color:#ff2020;text-shadow:0 0 30px #ff2020;border:2px solid #ff2020;padding:24px 48px;background:rgba(3,6,9,.95);">&#9888; OUT OF BAND</div>
+    </div>
     <div id="map"></div>
   </div>
   <div class="panel right">
@@ -2171,10 +2487,13 @@ function disableRadar(){
   if(radarRefreshTimer){clearInterval(radarRefreshTimer);radarRefreshTimer=null;}
   if(radarLayer){map.removeLayer(radarLayer);radarLayer=null;}
   var btn=document.getElementById('radar-btn');btn.className='off';btn.textContent='◎ RADAR OFF';}
-var markers=[],beamLine=null,_tunedSpot=null,_tunedCardSpot=null,_activatorMode=false,_lastPark='',_flrigFreqKhz=null,_flrigMode=null;
+var markers=[],beamLines=[],_tunedSpot=null,_tunedCardSpot=null,_activatorMode=false,_lastPark='',_flrigFreqKhz=null,_flrigMode=null,_pinnedTuned=null;
 var BAND_COLORS={'160m':'#ff4444','80m':'#ff8800','60m':'#ffcc00','40m':'#aaff00',
   '30m':'#00ffaa','20m':'#00e5ff','17m':'#0088ff','15m':'#8844ff',
   '12m':'#ff44cc','10m':'#ff2288','6m':'#ff0055','2m':'#ff6688','other':'#aaaaaa'};
+var BAND_COLORS_DAY={'160m':'#cc0000','80m':'#b85a00','60m':'#907000','40m':'#3a7000',
+  '30m':'#006a40','20m':'#005899','17m':'#0055cc','15m':'#5500cc',
+  '12m':'#aa0099','10m':'#cc0066','6m':'#cc0033','2m':'#993344','other':'#555555'};
 function freqToBand(k){
   if(!k)return 'other';
   if(k<2000)return '160m';if(k<4000)return '80m';if(k<5500)return '60m';
@@ -2184,7 +2503,21 @@ function freqToBand(k){
   return 'other';}
 function clearMarkers(){
   markers.forEach(function(m){map.removeLayer(m);});markers=[];
-  if(beamLine){map.removeLayer(beamLine);beamLine=null;}}
+  beamLines.forEach(function(l){map.removeLayer(l);});beamLines=[];}
+function showTunedCard(s){
+  var tsBox=document.getElementById('tuned-station-box');
+  var tsEmpty=document.getElementById('ts-empty');
+  if(s&&s.activator){
+    _tunedCardSpot=s;
+    document.getElementById('ts-call').textContent=s.activator;
+    var tdet='';
+    if(s.gs)tdet+='<span>Grid: '+s.gs+'</span>';
+    if(s.park)tdet+='<span>Park: '+s.park+(s.park_name?' — '+s.park_name:'')+'</span>';
+    var mhz=s.freq_khz?(s.freq_khz/1000).toFixed(3)+' MHz':'';
+    if(mhz||s.mode)tdet+='<span>'+[mhz,s.mode].filter(Boolean).join(' ')+'</span>';
+    document.getElementById('ts-detail').innerHTML=tdet;
+    tsBox.style.display='block';tsEmpty.style.display='none';
+  }else{tsBox.style.display='none';tsEmpty.style.display='block';}}
 function updateStatsPanel(d){
   var spots=d.spots||[],qsos=d.qsos||[];
   document.getElementById('stat-spots').textContent=spots.length||'—';
@@ -2194,7 +2527,7 @@ function updateStatsPanel(d){
   var keys=Object.keys(bc),bandsEl=document.getElementById('stat-bands');
   if(!keys.length){bandsEl.innerHTML='<div style="color:var(--dim);font-size:.6rem;letter-spacing:2px">NO SPOTS</div>';}
   else{bandsEl.innerHTML=keys.sort().map(function(b){
-    var c=BAND_COLORS[b]||'#aaa';
+    var c=(_dayMode?BAND_COLORS_DAY:BAND_COLORS)[b]||(_dayMode?'#555':'#aaa');
     return '<div class="chip" style="border-color:'+c+';color:'+c+'"><strong>'+bc[b]+'</strong> '+b+'</div>';
   }).join('');}
   var llBox=document.getElementById('last-logged-box');
@@ -2209,20 +2542,15 @@ function updateStatsPanel(d){
     document.getElementById('ll-detail').innerHTML=det;
     llBox.style.display='block';llEmpty.style.display='none';
   }else{llBox.style.display='none';llEmpty.style.display='block';}
-  var tsBox=document.getElementById('tuned-station-box');
-  var tsEmpty=document.getElementById('ts-empty');
-  if(d.tuned_spot&&d.tuned_spot.activator){
-    var ts=d.tuned_spot;
-    _tunedSpot=ts;_tunedCardSpot=ts;
-    document.getElementById('ts-call').textContent=ts.activator;
-    var tdet='';
-    if(ts.gs)tdet+='<span>Grid: '+ts.gs+'</span>';
-    if(ts.park)tdet+='<span>Park: '+ts.park+(ts.park_name?' — '+ts.park_name:'')+'</span>';
-    var mhz=ts.freq_khz?(ts.freq_khz/1000).toFixed(3)+' MHz':'';
-    if(mhz||ts.mode)tdet+='<span>'+[mhz,ts.mode].filter(Boolean).join(' ')+'</span>';
-    document.getElementById('ts-detail').innerHTML=tdet;
-    tsBox.style.display='block';tsEmpty.style.display='none';
-  }else{_tunedSpot=null;tsBox.style.display='none';tsEmpty.style.display='block';}}
+  if(d.tuned_spots&&d.tuned_spots.length&&d.tuned_spots[0].activator){
+    var preferred=null;
+    if(_pinnedTuned){
+      preferred=d.tuned_spots.find(function(t){return t.activator===_pinnedTuned.activator&&t.park===_pinnedTuned.park;})||null;
+      if(!preferred)_pinnedTuned=null;
+    }
+    _tunedSpot=preferred||d.tuned_spots[0];
+    showTunedCard(_tunedSpot);
+  }else{_tunedSpot=null;_pinnedTuned=null;showTunedCard(null);}}
 function updateSpotsPanel(d){
   var spots=(d.spots||[]).slice();
   spots.sort(function(a,b){return(a.spot_time||'').localeCompare(b.spot_time||'');});
@@ -2233,7 +2561,7 @@ function updateSpotsPanel(d){
     var badge=s.tuned?'<span class="spot-badge tuned">&#9679; TUNED</span>'
       :s.worked?'<span class="spot-badge worked">&#10003; WORKED</span>':'';
     var mhz=s.freq_khz?(s.freq_khz/1000).toFixed(3)+' MHz':'?';
-    var band=freqToBand(s.freq_khz),bc=BAND_COLORS[band]||'#aaa';
+    var band=freqToBand(s.freq_khz),bc=(_dayMode?BAND_COLORS_DAY:BAND_COLORS)[band]||(_dayMode?'#555':'#aaa');
     return '<div class="spot-item '+cls+'" data-i="'+i+'">'
       +'<div class="spot-call"><span>'+s.activator+'</span>'+badge+'</div>'
       +'<div class="spot-meta"><span class="spot-park">'+(s.park||'?')+'</span>'
@@ -2245,8 +2573,13 @@ function updateSpotsPanel(d){
     var i=parseInt(item.dataset.i);
     var s=spots[i];
     item.addEventListener('click',function(){
+      _pinnedTuned={activator:s.activator,park:s.park};
+      showTunedCard(s);
       fetch('/tune',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({activator:s.activator,park:s.park,freq_khz:s.freq_khz,mode:s.mode,tuned:s.tuned})});
+        body:JSON.stringify({activator:s.activator,park:s.park,freq_khz:s.freq_khz,mode:s.mode,tuned:s.tuned})})
+        .then(function(r){return r.json();}).then(function(d){
+          if(d.out_of_band){var ov=document.getElementById('oob-overlay');
+            ov.style.display='flex';setTimeout(function(){ov.style.display='none';},4000);}});
     });
     item.addEventListener('dblclick',function(e){
       e.stopPropagation();
@@ -2256,7 +2589,7 @@ function refreshData(){
   fetch('/data').then(function(r){return r.json();}).then(function(d){
     clearMarkers();
     (d.qsos||[]).forEach(function(q){
-      var m=L.circleMarker([q.lat,q.lon],{radius:6,color:'#cc44ff',fillColor:'#cc44ff',fillOpacity:0.7,weight:1});
+      var m=L.circleMarker([q.lat,q.lon],{radius:5,color:'#cc44ff',fillColor:'#cc44ff',fillOpacity:0.7,weight:1});
       var pop='<b>'+q.call+'</b>';
       if(q.park)pop+=' ['+q.park+']';
       if(q.band||q.mode)pop+='<br>'+[q.band,q.mode].filter(Boolean).join(' ');
@@ -2264,7 +2597,7 @@ function refreshData(){
       m.bindPopup(pop);m.addTo(map);markers.push(m);});
     (d.spots||[]).forEach(function(s){
       var color=s.tuned?'#00e5ff':s.worked?'#00bb44':(_dayMode?'#000000':'#ffff00');
-      var r=s.tuned?9:7;
+      var r=s.tuned?7:5;
       var cls=(!s.tuned&&!s.worked)?'spot-flash':'';
       var m=L.circleMarker([s.lat,s.lon],{radius:r,color:color,fillColor:color,fillOpacity:0.85,weight:s.tuned?2:1,className:cls});
       var pop=s.activator+' ['+s.park+']<br>'+s.freq_khz+' kHz '+s.mode;
@@ -2275,7 +2608,10 @@ function refreshData(){
       m.on('click',function(e){
         L.DomEvent.stopPropagation(e);
         fetch('/tune',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({activator:s.activator,park:s.park,freq_khz:s.freq_khz,mode:s.mode,tuned:s.tuned})});});
+          body:JSON.stringify({activator:s.activator,park:s.park,freq_khz:s.freq_khz,mode:s.mode,tuned:s.tuned})})
+          .then(function(r){return r.json();}).then(function(d){
+            if(d.out_of_band){var ov=document.getElementById('oob-overlay');
+              ov.style.display='flex';setTimeout(function(){ov.style.display='none';},4000);}});});
       m.addTo(map);markers.push(m);});
     if(d.my_grid){
       var mg=d.my_grid;
@@ -2283,10 +2619,11 @@ function refreshData(){
         html:'<span style="color:#ff2222;font-size:18px;">&#9733;</span>',
         className:'',iconAnchor:[9,9]})});
       star.bindPopup('My grid: '+mg.gs);star.addTo(map);markers.push(star);}
-    if(d.my_grid&&d.tuned_spot){
-      var gcp=gcPoints(d.my_grid.lat,d.my_grid.lon,d.tuned_spot.lat,d.tuned_spot.lon,60);
-      beamLine=L.polyline(gcp,{color:'#00e5ff',weight:2.5,dashArray:'12 8',opacity:0.85,className:'beam-anim'});
-      beamLine.addTo(map);}
+    if(d.my_grid&&d.tuned_spots&&d.tuned_spots.length){
+      d.tuned_spots.forEach(function(ts){
+        var gcp=gcPoints(d.my_grid.lat,d.my_grid.lon,ts.lat,ts.lon,60);
+        var bl=L.polyline(gcp,{color:'#00e5ff',weight:2.5,dashArray:'12 8',opacity:0.85,className:'beam-anim'});
+        bl.addTo(map);beamLines.push(bl);});}
     updateStatsPanel(d);
     updateSpotsPanel(d);
     var sb=document.getElementById('scan-btn');
@@ -2300,6 +2637,13 @@ function refreshData(){
     else{dot.className='status-dot offline';stxt.textContent='OFFLINE';}
     if(d.flrig_freq_khz!=null){_flrigFreqKhz=d.flrig_freq_khz;}
     if(d.flrig_mode){_flrigMode=d.flrig_mode;}
+    var vfoEl=document.getElementById('vfo-display');
+    if(vfoEl){
+      if(d.flrig_connected&&d.flrig_freq_khz!=null){
+        var mhz=(d.flrig_freq_khz/1000).toFixed(4);
+        vfoEl.textContent=mhz+' MHz \xb7 '+(d.flrig_mode||'—');
+        vfoEl.className='live';
+      }else{vfoEl.textContent='— \xb7 —';vfoEl.className='';}}
   }).catch(function(e){console.error('Fetch error:',e);});}
 function gcPoints(la1,lo1,la2,lo2,n){
   var R=Math.PI/180;
@@ -2328,7 +2672,13 @@ setInterval(function(){
 function toggleMode(){
   _activatorMode=!_activatorMode;
   var btn=document.getElementById('mode-toggle-btn');
-  if(_activatorMode){btn.textContent='HUNTER MODE';btn.className='mode-btn activator';openLogModal(null);}
+  if(_activatorMode){
+    btn.textContent='HUNTER MODE';btn.className='mode-btn activator';_lastPark='';openLogModal(null);
+    var banner=document.getElementById('activator-banner');
+    banner.classList.remove('banner-flashing');
+    void banner.offsetWidth;
+    banner.classList.add('banner-flashing');
+    banner.addEventListener('animationend',function(){banner.classList.remove('banner-flashing');},{once:true});}
   else{btn.textContent='ACTIVATOR MODE';btn.className='mode-btn';}}
 function toggleRespoPanel(){
   var p=document.getElementById('respot-panel');
@@ -2394,9 +2744,11 @@ function openLogModal(spot){
   document.getElementById('lm-selfspot-btn').style.display=_activatorMode?'':'none';
   var freqEl=document.getElementById('lm-freq');
   var modeEl=document.getElementById('lm-mode');
+  document.getElementById('lm-name').value='';
+  document.getElementById('lm-qth').value='';
   if(_activatorMode){
     document.getElementById('lm-call').value='';
-    document.getElementById('lm-park').value='';
+    document.getElementById('lm-park').value=_lastPark||'';
     document.getElementById('lm-grid').value='';
     document.getElementById('lm-comment').value='';
     freqEl.value=_flrigFreqKhz?String(_flrigFreqKhz):'';
@@ -2406,31 +2758,51 @@ function openLogModal(spot){
   }else{
     var s=spot||_tunedSpot;
     if(!s)return;
-    document.getElementById('lm-call').value=s.activator||'';
+    var preCall=s.activator||'';
+    document.getElementById('lm-call').value=preCall;
     document.getElementById('lm-park').value=s.park||'';
     freqEl.value=s.freq_khz?String(s.freq_khz):'';
     modeEl.value=s.mode||'';
     document.getElementById('lm-grid').value=s.gs||'';
     freqEl.setAttribute('readonly','');
     modeEl.setAttribute('readonly','');
+    if(preCall){lmLookupCall(preCall);}
   }
   document.getElementById('lm-rst-s').value='59';
   document.getElementById('lm-rst-r').value='59';
   document.getElementById('lm-comment').value='';
   var st=document.getElementById('lm-status');st.textContent='';st.className='';
   document.getElementById('lm-submit-btn').disabled=false;
+  document.getElementById('lm-clear-btn').style.display=_activatorMode?'':'none';
+  document.getElementById('lm-multiop-btn').style.display=_activatorMode?'none':'';
+  document.getElementById('activator-banner').style.display=_activatorMode?'block':'none';
+  fetch('/scan_pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:1})});
   var ov=document.getElementById('log-modal-overlay');ov.style.display='flex';
   setTimeout(function(){document.getElementById('lm-call').focus();},50);}
 function closeLogModal(){
+  if(_activatorMode){deactivateActivatorMode();return;}
   document.getElementById('lm-freq').setAttribute('readonly','');
   document.getElementById('lm-mode').setAttribute('readonly','');
-  document.getElementById('log-modal-overlay').style.display='none';}
+  document.getElementById('log-modal-overlay').style.display='none';
+  fetch('/scan_pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:0})});}
+function deactivateActivatorMode(){
+  _activatorMode=false;
+  document.getElementById('mode-toggle-btn').textContent='ACTIVATOR MODE';
+  document.getElementById('mode-toggle-btn').className='mode-btn';
+  document.getElementById('lm-clear-btn').style.display='none';
+  document.getElementById('activator-banner').style.display='none';
+  document.getElementById('lm-freq').setAttribute('readonly','');
+  document.getElementById('lm-mode').setAttribute('readonly','');
+  document.getElementById('log-modal-overlay').style.display='none';
+  fetch('/scan_pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:0})});}
 function submitLogQSO(){
   var call=document.getElementById('lm-call').value.trim().toUpperCase();
   var st=document.getElementById('lm-status');
   if(!call){st.textContent='CALLSIGN REQUIRED';st.className='err';return;}
   var payload={
     call:call,
+    name:document.getElementById('lm-name').value.trim(),
+    qth:document.getElementById('lm-qth').value.trim(),
     park:document.getElementById('lm-park').value.trim(),
     freq_khz:parseFloat(document.getElementById('lm-freq').value)||0,
     mode:document.getElementById('lm-mode').value.trim().toUpperCase(),
@@ -2450,7 +2822,9 @@ function submitLogQSO(){
         if(_activatorMode){
           setTimeout(function(){
             document.getElementById('lm-call').value='';
-            document.getElementById('lm-park').value='';
+            document.getElementById('lm-name').value='';
+            document.getElementById('lm-qth').value='';
+            document.getElementById('lm-park').value=_lastPark||'';
             document.getElementById('lm-rst-s').value='59';
             document.getElementById('lm-rst-r').value='59';
             st.textContent='';st.className='';
@@ -2460,20 +2834,93 @@ function submitLogQSO(){
         }else{setTimeout(closeLogModal,900);}
       }else{st.textContent='ERROR: '+(data.error||'unknown');st.className='err';btn.disabled=false;}})
     .catch(function(){st.textContent='NETWORK ERROR';st.className='err';btn.disabled=false;});}
+function submitMultiOp(){
+  var call=document.getElementById('lm-call').value.trim().toUpperCase();
+  var st=document.getElementById('lm-status');
+  if(!call){st.textContent='CALLSIGN REQUIRED';st.className='err';return;}
+  var payload={
+    call:call,
+    name:document.getElementById('lm-name').value.trim(),
+    qth:document.getElementById('lm-qth').value.trim(),
+    park:document.getElementById('lm-park').value.trim(),
+    freq_khz:parseFloat(document.getElementById('lm-freq').value)||0,
+    mode:document.getElementById('lm-mode').value.trim().toUpperCase(),
+    rst_sent:document.getElementById('lm-rst-s').value.trim()||'59',
+    rst_rcvd:document.getElementById('lm-rst-r').value.trim()||'59',
+    gridsquare:document.getElementById('lm-grid').value.trim().toUpperCase(),
+    comment:document.getElementById('lm-comment').value.trim()};
+  var btn=document.getElementById('lm-multiop-btn');
+  btn.disabled=true;st.textContent='LOGGING…';st.className='';
+  fetch('/log',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.ok){
+        st.textContent='LOGGED ✔';st.className='ok';
+        setTimeout(function(){
+          document.getElementById('lm-call').value='';
+          document.getElementById('lm-name').value='';
+          document.getElementById('lm-qth').value='';
+          document.getElementById('lm-rst-s').value='59';
+          document.getElementById('lm-rst-r').value='59';
+          st.textContent='';st.className='';
+          btn.disabled=false;
+          document.getElementById('lm-call').focus();
+        },700);
+      }else{st.textContent='ERROR: '+(data.error||'unknown');st.className='err';btn.disabled=false;}})
+    .catch(function(){st.textContent='NETWORK ERROR';st.className='err';btn.disabled=false;});}
 refreshData();
 setInterval(refreshData,2000);
 map.on('click',function(){fetch('/scan',{method:'POST'});});
 document.getElementById('scan-btn').addEventListener('click',function(e){e.stopPropagation();fetch('/scan',{method:'POST'});});
 document.getElementById('radar-btn').addEventListener('click',function(e){e.stopPropagation();if(radarEnabled){disableRadar();}else{enableRadar();}});
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLogModal();}});
-document.getElementById('log-modal-overlay').addEventListener('click',function(e){if(e.target===this){closeLogModal();}});
+document.addEventListener('click',function(e){if(e.target.id==='log-modal-overlay'){closeLogModal();}});
+function lmLookupCall(call){
+  if(!call)return;
+  fetch('/lookup?call='+encodeURIComponent(call))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var ne=document.getElementById('lm-name');
+      var qe=document.getElementById('lm-qth');
+      if(d.name&&!ne.value.trim())ne.value=d.name;
+      if(d.qth&&!qe.value.trim())qe.value=d.qth;
+    }).catch(function(){});}
+var _lmCallDebounce=null;
+document.addEventListener('focusout',function(e){
+  if(e.target.id!=='lm-call')return;
+  lmLookupCall(e.target.value.trim().toUpperCase());});
+document.addEventListener('input',function(e){
+  if(e.target.id!=='lm-call')return;
+  if(!_activatorMode)return;
+  var v=e.target.value.trim().toUpperCase();
+  clearTimeout(_lmCallDebounce);
+  if(v.length>=3){_lmCallDebounce=setTimeout(function(){lmLookupCall(v);},400);}});
+function clearLogModal(){
+  document.getElementById('lm-call').value='';
+  document.getElementById('lm-name').value='';
+  document.getElementById('lm-qth').value='';
+  document.getElementById('lm-rst-s').value='59';
+  document.getElementById('lm-rst-r').value='59';
+  document.getElementById('lm-comment').value='';
+  var st=document.getElementById('lm-status');st.textContent='';st.className='';
+  document.getElementById('lm-call').focus();}
 </script>
 <div id="log-modal-overlay">
+  <div id="activator-banner">&#9632; ACTIVATED &#9632;</div>
   <div id="log-modal">
     <div class="lm-title">&#9632; LOG QSO</div>
     <div class="lm-row">
       <div class="lm-label">Callsign</div>
       <input class="lm-input" id="lm-call" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="lm-row">
+      <div class="lm-label">Name</div>
+      <input class="lm-input" id="lm-name" type="text" autocomplete="off" placeholder="Auto-filled">
+    </div>
+    <div class="lm-row">
+      <div class="lm-label">City / State</div>
+      <input class="lm-input" id="lm-qth" type="text" autocomplete="off" placeholder="Auto-filled">
     </div>
     <div class="lm-row">
       <div class="lm-label">Park Reference</div>
@@ -2512,7 +2959,11 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
       <button class="lm-btn confirm" id="lm-submit-btn" onclick="submitLogQSO()">&#9632; LOG QSO</button>
     </div>
     <div class="lm-btns" style="margin-top:8px">
+      <button class="lm-btn multiop" id="lm-multiop-btn" onclick="submitMultiOp()">&#9654; MULTI-OP</button>
+    </div>
+    <div class="lm-btns" style="margin-top:8px">
       <button class="lm-btn selfspot" id="lm-selfspot-btn" style="display:none" onclick="submitSelfSpot()">&#10023; SELF SPOT</button>
+      <button class="lm-btn clear" id="lm-clear-btn" style="display:none" onclick="clearLogModal()">&#9249; CLEAR</button>
       <button class="lm-btn cancel" onclick="closeLogModal()">&#10005; CANCEL</button>
     </div>
   </div>
@@ -2531,17 +2982,30 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                 self.wfile.write(body)
 
             def do_GET(self):
-                if self.path == '/data':
+                parsed = urllib.parse.urlparse(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+                if parsed.path == '/data':
                     self._handle_data()
-                elif self.path == '/debug':
+                elif parsed.path == '/debug':
                     self._handle_debug()
-                elif self.path == '/radar':
+                elif parsed.path == '/radar':
                     self._handle_radar()
+                elif parsed.path == '/lookup':
+                    call = params.get("call", [""])[0].strip().upper()
+                    info = {}
+                    if call:
+                        result = (fcc_lookup(call) or hamdb_lookup(call)
+                                  or qrz_lookup(call))
+                        if result:
+                            info = result
+                    self._send_json(info)
                 else:
                     body = MAP_HTML.encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                    self.send_header("Pragma", "no-cache")
                     self.end_headers()
                     self.wfile.write(body)
 
@@ -2654,7 +3118,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                             "spot_time": str(s.get("spotTime", s.get("timestamp", ""))),
                         })
                     my_grid_data = None
-                    tuned_spot = None
+                    tuned_spots = []
                     my_gs = (app.cfg.get("gridsquare") or "")[:6].strip().upper()
                     if len(my_gs) >= 4:
                         mlat, mlon = grid_to_latlon(my_gs)
@@ -2662,13 +3126,12 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                             my_grid_data = {"gs": my_gs, "lat": mlat, "lon": mlon}
                     for sp in spots_out:
                         if sp["tuned"]:
-                            tuned_spot = {
+                            tuned_spots.append({
                                 "lat": sp["lat"], "lon": sp["lon"],
                                 "activator": sp["activator"], "park": sp["park"],
                                 "park_name": sp["park_name"], "gs": sp["gs"],
                                 "freq_khz": sp["freq_khz"], "mode": sp["mode"],
-                            }
-                            break
+                            })
                     # Build QSO markers from logged contacts
                     qsos_out = []
                     try:
@@ -2728,7 +3191,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                         "spots": spots_out,
                         "qsos": qsos_out,
                         "my_grid": my_grid_data,
-                        "tuned_spot": tuned_spot,
+                        "tuned_spots": tuned_spots,
                         "scanning": app._pota_scan_active,
                         "callsign": app.cfg.get("callsign", ""),
                         "flrig_connected": app._flrig_freq_hz is not None,
@@ -2747,8 +3210,16 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                     except Exception:
                         self._send_json({"error": "bad json"}, status=400)
                         return
+                    try:
+                        freq_mhz = float(data.get("freq_khz", 0)) / 1000.0
+                    except (TypeError, ValueError):
+                        freq_mhz = 0.0
+                    lic = app.cfg.get("license_class", "Extra")
+                    oob = bool(freq_mhz) and not _in_band(freq_mhz, lic, str(data.get("mode","")))
                     app.after(0, lambda d=data: app._on_map_station_click(d))
-                    self._send_json({"ok": True})
+                    if oob:
+                        app.after(0, lambda f=freq_mhz: app._warn_out_of_band(f))
+                    self._send_json({"ok": True, "out_of_band": oob})
                 elif self.path == '/respot-self':
                     try:
                         length = int(self.headers.get('Content-Length', 0))
@@ -2812,6 +3283,14 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                         self._send_json({"error": result}, status=400)
                 elif self.path == '/scan':
                     app.after(0, app._toggle_pota_scan)
+                    self._send_json({"ok": True})
+                elif self.path == '/scan_pause':
+                    try:
+                        length = int(self.headers.get('Content-Length', 0))
+                        data = json.loads(self.rfile.read(length)) if length else {}
+                    except Exception:
+                        data = {}
+                    app._scan_paused_by_map = bool(data.get('state', 0))
                     self._send_json({"ok": True})
                 else:
                     self._send_json({"error": "not found"}, status=404)
@@ -2879,6 +3358,9 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         ttk.Checkbutton(
             tb, text="Hide QRT", variable=self._pota_hide_qrt,
             command=self._apply_pota_filters).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(
+            tb, text="Hide OOB", variable=self._pota_hide_oob,
+            command=self._apply_pota_filters).pack(side="left", padx=(6, 0))
         tk.Label(tb, text="ITU:", bg=PBGK, fg=FG2, font=SM).pack(side="left", padx=(10, 2))
         for _rgn, _var in (("R1", self._pota_itu_r1),
                             ("R2", self._pota_itu_r2),
@@ -3000,6 +3482,17 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                      if "qrt" not in str(
                          s.get("comments", s.get("comment", ""))).lower()]
 
+        if self._pota_hide_oob.get():
+            lic = self.cfg.get("license_class", "Extra")
+            def _oob(s):
+                try:
+                    freq_mhz = float(s.get("frequency", s.get("freq", 0)) or 0) / 1000
+                except Exception:
+                    return False
+                mode = str(s.get("mode", ""))
+                return not _in_band(freq_mhz, lic, mode)
+            spots = [s for s in spots if not _oob(s)]
+
         sel_regions = set()
         if self._pota_itu_r1.get(): sel_regions.add(1)
         if self._pota_itu_r2.get(): sel_regions.add(2)
@@ -3035,6 +3528,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         if getattr(self, '_suppress_pota_tune', False):
             self._suppress_pota_tune = False
             return
+        if self._scan_paused_by_map:
+            return
         sel = self._pota_tree.selection()
         if not sel:
             return
@@ -3054,6 +3549,9 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         # Populate QSO entry fields
         self.e_call.delete(0, "end")
         self.e_call.insert(0, activator.upper())
+        self.e_name.delete(0, "end")
+        self.e_qth.delete(0, "end")
+        self._qrz_info_lbl.config(text="")
         self.e_park.delete(0, "end")
         self.e_park.insert(0, park)
 
@@ -3077,6 +3575,13 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         except (ValueError, TypeError):
             return
 
+        # Out-of-band check for user's license class
+        spot_mode = values[4] if len(values) > 4 else ""
+        freq_mhz = freq_khz / 1000.0
+        lic = self.cfg.get("license_class", "Extra")
+        if not _in_band(freq_mhz, lic, spot_mode):
+            self.after(0, lambda f=freq_mhz: self._warn_out_of_band(f))
+
         # Immediately highlight this row and suppress the flrig poll
         # from overwriting it before the tune command completes.
         self._last_tuned_spot_key = (activator.strip().upper(), park.strip())
@@ -3089,7 +3594,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self._pota_status_lbl.config(text=f"Tuning to {freq_mhz_disp} MHz…", fg=FG2)
 
         def _tune():
-            result = flrig_set_freq(host, port, freq_hz)
+            result = flrig_set_freq_and_mode(host, port, freq_hz, spot_mode)
             if result is True:
                 msg = f"Tuned → {freq_mhz_disp} MHz"
                 fg  = ACC3
@@ -3105,6 +3610,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
     def _on_map_station_click(self, data):
         if self._pota_scan_active:
             self._stop_pota_scan()
+        if self._scan_paused_by_map:
+            return
         if data.get("tuned"):
             return
         try:
@@ -3130,8 +3637,9 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         port = self.cfg["flrig_port"]
         self._pota_status_lbl.config(text=f"Tuning to {freq_mhz_disp} MHz…", fg=FG2)
 
+        map_mode = str(data.get("mode", "")).strip()
         def _tune():
-            result = flrig_set_freq(host, port, freq_hz)
+            result = flrig_set_freq_and_mode(host, port, freq_hz, map_mode)
             if result is True:
                 self._tune_suppress_until = time.monotonic() + 3.0
                 self.after(0, lambda: self._update_vfo_display(freq_hz, self._flrig_mode, force=True))
@@ -3266,6 +3774,10 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
     def _pota_scan_step(self):
         if not self._pota_scan_active:
             return
+        interval_ms = max(5, min(60, self._pota_scan_interval.get())) * 1_000
+        if self._flrig_ptt or self._scan_paused_by_map:
+            self._pota_scan_after_id = self.after(interval_ms, self._pota_scan_step)
+            return
         children = self._pota_tree.get_children()
         if not children:
             self._stop_pota_scan()
@@ -3290,7 +3802,6 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self._pota_tree.see(iid)
         self._pota_scan_idx += 1
         self._refresh_map()
-        interval_ms = max(5, min(60, self._pota_scan_interval.get())) * 1_000
         self._pota_scan_after_id = self.after(interval_ms, self._pota_scan_step)
 
     # ── Entry form ────────────────────────────────────────────────────────
@@ -3302,8 +3813,9 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         f = tk.Frame(parent, bg=BG)
         f.pack(fill="x", padx=10, pady=(8,4))
 
-        labels = ["Callsign *", "RST Sent", "RST Rcvd", "Park #", "Grid", "Comments", "Notes"]
-        col_weights = [0, 0, 0, 0, 0, 1, 1]
+        labels      = ["Callsign *", "Name", "City / State", "RST Sent", "RST Rcvd",
+                       "Park #", "Grid", "Comments", "Notes"]
+        col_weights = [0, 0, 0, 0, 0, 0, 0, 1, 1]
         for i, (text, wt) in enumerate(zip(labels, col_weights)):
             tk.Label(f, text=text, **lbl_kw).grid(
                 row=0, column=i, sticky="w",
@@ -3316,32 +3828,40 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self.e_call.bind("<Return>",   self._log_qso)
         self.e_call.grid(row=1, column=0, padx=(0,4), sticky="w")
 
+        self.e_name = tk.Entry(f, width=18, **ent)
+        self.e_name.bind("<Return>", self._log_qso)
+        self.e_name.grid(row=1, column=1, padx=(10,4), sticky="w")
+
+        self.e_qth = tk.Entry(f, width=15, **ent)
+        self.e_qth.bind("<Return>", self._log_qso)
+        self.e_qth.grid(row=1, column=2, padx=(10,4), sticky="w")
+
         self.e_rst_s = tk.Entry(f, width=5, **ent)
         self.e_rst_s.insert(0,"59")
         self.e_rst_s.bind("<Return>", self._log_qso)
-        self.e_rst_s.grid(row=1, column=1, padx=(10,4), sticky="w")
+        self.e_rst_s.grid(row=1, column=3, padx=(10,4), sticky="w")
 
         self.e_rst_r = tk.Entry(f, width=5, **ent)
         self.e_rst_r.insert(0,"59")
         self.e_rst_r.bind("<Return>", self._log_qso)
-        self.e_rst_r.grid(row=1, column=2, padx=(10,4), sticky="w")
+        self.e_rst_r.grid(row=1, column=4, padx=(10,4), sticky="w")
 
         self.e_park = tk.Entry(f, width=11, **ent)
         self.e_park.bind("<Return>",   self._log_qso)
         self.e_park.bind("<FocusOut>", self._on_park_focusout)
-        self.e_park.grid(row=1, column=3, padx=(10,4), sticky="w")
+        self.e_park.grid(row=1, column=5, padx=(10,4), sticky="w")
 
         self.e_grid = tk.Entry(f, width=7, **ent)
         self.e_grid.bind("<Return>", self._log_qso)
-        self.e_grid.grid(row=1, column=4, padx=(10,4), sticky="w")
+        self.e_grid.grid(row=1, column=6, padx=(10,4), sticky="w")
 
         self.e_comment = tk.Entry(f, width=22, **ent)
         self.e_comment.bind("<Return>", self._log_qso)
-        self.e_comment.grid(row=1, column=5, padx=(10,4), sticky="ew")
+        self.e_comment.grid(row=1, column=7, padx=(10,4), sticky="ew")
 
         self.e_notes = tk.Entry(f, width=22, **ent)
         self.e_notes.bind("<Return>", self._log_qso)
-        self.e_notes.grid(row=1, column=6, padx=(10,4), sticky="ew")
+        self.e_notes.grid(row=1, column=8, padx=(10,4), sticky="ew")
 
         info_row = tk.Frame(parent, bg=BG)
         info_row.pack(fill="x", padx=10, pady=(2,0))
@@ -3363,8 +3883,10 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         tk.Button(btn_row, text=" Snipe QSO", image=self._reticle_img,
                   compound="left", bg=ACCENT, fg=BG,
                   command=self._log_qso, **bc).pack(side="left")
+        tk.Button(btn_row, text="⊕ Multi-Op", bg=BG2, fg=FG,
+                  command=self._multi_op_qso, **bc).pack(side="left", padx=8)
         tk.Button(btn_row, text="✕ Clear Form", bg=BG3, fg=FG2,
-                  command=self._clear_form, **bc).pack(side="left", padx=8)
+                  command=self._clear_form, **bc).pack(side="left")
 
         tk.Label(btn_row, text="Check for clear freq kHz:", bg=BG, fg=FG2, font=LBL).pack(side="left", padx=(12, 2))
         self._freq_check_border = tk.Frame(btn_row, bg=MUTED)
@@ -3375,6 +3897,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         freq_entry.pack(padx=3, pady=3)
         freq_entry.bind("<Return>", lambda _: self._check_freq_conflict())
         freq_entry.bind("<KeyRelease>", lambda e: self._reset_freq_border() if e.keysym != "Return" else None)
+        self._freq_check_label = tk.Label(btn_row, text="", bg=BG, fg=FG2, font=LBL, width=5, anchor="w")
+        self._freq_check_label.pack(side="left", padx=(4, 0))
 
         self.e_call.focus_set()
 
@@ -3385,20 +3909,58 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
             return
         self.e_call.delete(0,"end")
         self.e_call.insert(0, call)
-        if _qrz_session:
-            threading.Thread(target=self._qrz_lookup_bg,
-                             args=(call,), daemon=True).start()
+        self._qrz_info_lbl.config(text="")
+        threading.Thread(target=self._qrz_lookup_bg,
+                         args=(call,), daemon=True).start()
 
     def _qrz_lookup_bg(self, call):
-        info = qrz_lookup(call)
+        # Tier 1: local FCC database (instant, offline, US callsigns)
+        info = fcc_lookup(call)
+        # Tier 2: HamDB free API (non-US callsigns, or FCC DB not built yet)
+        if not info:
+            info = hamdb_lookup(call)
+        # Tier 3: QRZ (requires subscription, broadest coverage)
+        if not info:
+            qrz = qrz_lookup(call)
+            if qrz:
+                qrz["source"] = "QRZ"
+                info = qrz
+        # If FCC found it but has no grid, try HamDB for the grid square
+        if info and info.get("source") == "FCC" and not info.get("grid"):
+            hdb = hamdb_lookup(call)
+            if hdb and hdb.get("grid"):
+                info["grid"] = hdb["grid"]
         if info:
             self.after(0, lambda: self._apply_qrz_info(info))
 
     def _apply_qrz_info(self, info):
-        parts = [v for v in (info.get("name",""), info.get("qth",""),
-                              info.get("grid","")) if v]
+        source = info.get("source", "")
+        name   = info.get("name", "")
+        qth    = info.get("qth", "")
+        grid   = info.get("grid", "")
+        cls    = info.get("class", "")
+        CLASS_FULL = {"E": "Extra", "A": "Advanced", "G": "General",
+                      "T": "Technician", "N": "Novice", "P": "Tech+"}
+        cls_str = CLASS_FULL.get(cls, cls)
+        parts = []
+        if name:
+            parts.append(f"{name} ({cls_str})" if cls_str else name)
+        if qth:
+            parts.append(qth)
+        if grid:
+            parts.append(grid)
+        prefix = f"[{source}] " if source else ""
         self._qrz_info_lbl.config(
-            text=("QRZ: " + "  ".join(parts)) if parts else "")
+            text=(prefix + "  ".join(parts)) if parts else "")
+        if name and not self.e_name.get().strip():
+            self.e_name.delete(0, "end")
+            self.e_name.insert(0, name)
+        if qth and not self.e_qth.get().strip():
+            self.e_qth.delete(0, "end")
+            self.e_qth.insert(0, qth)
+        if grid and not self.e_grid.get().strip():
+            self.e_grid.delete(0, "end")
+            self.e_grid.insert(0, grid[:4])
 
     def _on_park_focusout(self, _=None):
         ref = self.e_park.get().strip().upper()
@@ -3435,7 +3997,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self._park_info_lbl.config(text=label, fg=ACC3)
 
     def _clear_form(self):
-        for w in (self.e_call, self.e_park, self.e_grid, self.e_comment, self.e_notes):
+        for w in (self.e_call, self.e_name, self.e_qth, self.e_park, self.e_grid,
+                  self.e_comment, self.e_notes):
             w.delete(0,"end")
         self.e_rst_s.delete(0,"end"); self.e_rst_s.insert(0,"59")
         self.e_rst_r.delete(0,"end"); self.e_rst_r.insert(0,"59")
@@ -3447,6 +4010,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
     def _reset_freq_border(self):
         if self._freq_check_border is not None:
             self._freq_check_border.config(bg=MUTED)
+        if self._freq_check_label is not None:
+            self._freq_check_label.config(text="", fg=FG2)
 
     def _check_freq_conflict(self):
         if self._freq_check_border is None:
@@ -3465,17 +4030,19 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                  if s.get("frequency", s.get("freq")) not in (None, "", 0)]
         if not valid:
             self._freq_check_border.config(bg=MUTED)
+            if self._freq_check_label is not None:
+                self._freq_check_label.config(text="", fg=FG2)
             return
         min_dist = min(abs(entered_khz - f) for f in valid)
-        if min_dist < 1:
-            color = WARN    # red   — 0.0–0.9 kHz
-        elif min_dist < 2:
-            color = ACCENT  # orange — 1.0–1.9 kHz
+        if min_dist < 2:
+            color, label_text, label_fg = WARN,   "No",    WARN
         elif min_dist < 3:
-            color = YELLOW  # yellow — 2.0–2.9 kHz
+            color, label_text, label_fg = YELLOW, "Maybe", YELLOW
         else:
-            color = ACC3    # green  — 3.0+ kHz
+            color, label_text, label_fg = ACC3,   "Yes",   ACC3
         self._freq_check_border.config(bg=color)
+        if self._freq_check_label is not None:
+            self._freq_check_label.config(text=label_text, fg=label_fg)
 
     # ── Log QSO ───────────────────────────────────────────────────────────
     def _log_qso(self, _=None):
@@ -3512,8 +4079,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
             "mode":       mode,
             "rst_sent":   self.e_rst_s.get().strip() or "59",
             "rst_rcvd":   self.e_rst_r.get().strip() or "59",
-            "name":       "",
-            "qth":        "",
+            "name":       self.e_name.get().strip(),
+            "qth":        self.e_qth.get().strip(),
             "gridsquare": self.e_grid.get().strip().upper(),
             "park_nr":    self.e_park.get().strip(),
             "comment":    self.e_comment.get().strip(),
@@ -3541,6 +4108,14 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self._refresh_pota_highlights()
         self._maybe_post_pota_spot(row)
         self._clear_form()
+
+    def _multi_op_qso(self):
+        """Log QSO then restore park/grid so the next contact at the same park is ready."""
+        park = self.e_park.get().strip()
+        grid = self.e_grid.get().strip()
+        self._log_qso()
+        self.e_park.delete(0, "end"); self.e_park.insert(0, park)
+        self.e_grid.delete(0, "end"); self.e_grid.insert(0, grid)
 
     def _log_qso_from_web(self, data):
         """Log a QSO submitted from the HTML map page. Returns True or an error string."""
@@ -3572,8 +4147,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
             "mode":       mode,
             "rst_sent":   str(data.get("rst_sent", "59")).strip() or "59",
             "rst_rcvd":   str(data.get("rst_rcvd", "59")).strip() or "59",
-            "name":       "",
-            "qth":        "",
+            "name":       str(data.get("name", "")).strip(),
+            "qth":        str(data.get("qth", "")).strip(),
             "gridsquare": str(data.get("gridsquare", "")).strip().upper(),
             "park_nr":    str(data.get("park", "")).strip(),
             "comment":    str(data.get("comment", "")).strip(),
@@ -3719,6 +4294,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self.conn.commit()
         rewrite_adif(self.adif_path, self.conn,
                      self.cfg.get("callsign","").upper())
+        load_adif_into_index(self.adif_path, self.conn)
         self._reload_table()
         self._set_status(f"Deleted QSO #{qso_id}")
 
@@ -3819,6 +4395,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self.cfg["pota_band"]             = self._pota_band_var.get()
         self.cfg["pota_mode"]             = self._pota_mode_var.get()
         self.cfg["pota_hide_qrt"]         = self._pota_hide_qrt.get()
+        self.cfg["pota_hide_oob"]         = self._pota_hide_oob.get()
         self.cfg["pota_itu_r1"]           = self._pota_itu_r1.get()
         self.cfg["pota_itu_r2"]           = self._pota_itu_r2.get()
         self.cfg["pota_itu_r3"]           = self._pota_itu_r3.get()
@@ -3856,6 +4433,42 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _update_fcc_db(self):
+        fcc_date = self.cfg.get("fcc_db_date", "")
+        action   = "re-download and update" if fcc_date else "download"
+        if not messagebox.askyesno(
+                "FCC Callsign Database",
+                f"This will {action} the FCC amateur radio license database\n"
+                "from data.fcc.gov (~175 MB download).\n\n"
+                "After building, callsigns will auto-populate name, city,\n"
+                "state, and license class when you tab out of the callsign field.\n\n"
+                f"Destination: {FCC_DB}\n\nContinue?"):
+            return
+        self._set_status("Downloading FCC callsign database…")
+
+        def _progress(msg):
+            self.after(0, lambda: self._set_status(msg))
+
+        def _worker():
+            count, err = build_fcc_db(progress_cb=_progress)
+            if err:
+                self.after(0, lambda: (
+                    messagebox.showerror("FCC DB Error", err),
+                    self._set_status(f"FCC DB update failed: {err}")))
+            else:
+                today = datetime.date.today().isoformat()
+                self.cfg["fcc_db_date"] = today
+                save_config(self.cfg)
+                self.after(0, lambda: (
+                    messagebox.showinfo(
+                        "FCC Database Ready",
+                        f"Downloaded and indexed {count:,} US amateur callsigns.\n"
+                        f"Saved to: {FCC_DB}"),
+                    self._set_status(
+                        f"FCC callsign DB updated — {count:,} callsigns.")))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _check_parks_db_on_startup(self):
         if parks_db_exists():
             return
@@ -3865,6 +4478,19 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
                 "Download it now? (~1 MB, runs in background)\n"
                 f"Will be saved to: {PARKS_DB}"):
             self._update_parks_db()
+
+    def _check_fcc_db_on_startup(self):
+        fcc_date = self.cfg.get("fcc_db_date", "")
+        if fcc_date:
+            try:
+                built = datetime.date.fromisoformat(fcc_date)
+                age   = (datetime.date.today() - built).days
+                if age > 30:
+                    self._set_status(
+                        f"FCC callsign DB is {age} days old — "
+                        "consider updating via Settings > Update FCC Callsign DB…")
+            except ValueError:
+                pass
 
     def _switch_theme(self):
         current = self.cfg.get("theme", "dark")
@@ -3900,6 +4526,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
         self._pota_band_var  = tk.StringVar(value=self.cfg.get("pota_band", "All"))
         self._pota_mode_var  = tk.StringVar(value=self.cfg.get("pota_mode", "All"))
         self._pota_hide_qrt  = tk.BooleanVar(value=self.cfg.get("pota_hide_qrt", False))
+        self._pota_hide_oob  = tk.BooleanVar(value=self.cfg.get("pota_hide_oob", False))
         self._pota_itu_r1    = tk.BooleanVar(value=self.cfg.get("pota_itu_r1", True))
         self._pota_itu_r2    = tk.BooleanVar(value=self.cfg.get("pota_itu_r2", True))
         self._pota_itu_r3    = tk.BooleanVar(value=self.cfg.get("pota_itu_r3", True))
@@ -3920,6 +4547,23 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
             self._qrz_lbl.config(text="QRZ: ✔", fg=ACC3)
 
         self._start_flrig_poll()
+
+    # ── Flrig auto-start ──────────────────────────────────────────────────
+    def _maybe_start_flrig(self):
+        if not self.cfg.get("flrig_autostart") or not self.cfg.get("flrig_exe_path"):
+            return
+        freq, _ = flrig_get(self.cfg["flrig_host"], self.cfg["flrig_port"])
+        if freq is not None:
+            return  # already running — don't own it
+        try:
+            self._flrig_proc = subprocess.Popen(
+                [self.cfg["flrig_exe_path"]],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._flrig_proc_owned = True
+        except Exception as e:
+            messagebox.showwarning("flrig", f"Could not start flrig:\n{e}")
 
     # ── Flrig poll ────────────────────────────────────────────────────────
     def _start_flrig_poll(self):
@@ -3942,6 +4586,7 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
     def _update_vfo_display(self, freq_hz, mode, force=False,
                             smeter=None, pwrmeter=None, ptt=False):
         suppressed = not force and time.monotonic() < self._tune_suppress_until
+        self._flrig_ptt = bool(ptt)
         if freq_hz is not None:
             if not suppressed:
                 self._flrig_freq_hz = freq_hz
@@ -4018,6 +4663,13 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
     def _set_status(self, msg):
         self._status_var.set(msg)
 
+    def _warn_out_of_band(self, freq_mhz):
+        lic = self.cfg.get("license_class", "?")
+        messagebox.showwarning(
+            "Out of Band",
+            f"{freq_mhz:.4f} MHz is outside your {lic} license privileges.\n\nOut of Band",
+            parent=self)
+
     def _update_mycall_lbl(self):
         call = self.cfg.get("callsign","")
         self._mycall_lbl.config(text=call.upper() if call else "No callsign set")
@@ -4034,6 +4686,8 @@ document.getElementById('log-modal-overlay').addEventListener('click',function(e
             "Logbooks folder: " + LOGBOOK_DIR)
 
     def destroy(self):
+        if self._flrig_proc_owned and self._flrig_proc and self._flrig_proc.poll() is None:
+            self._flrig_proc.terminate()
         if self._flrig_poll_id:
             self.after_cancel(self._flrig_poll_id)
         if self._pota_after_id:
@@ -4109,7 +4763,21 @@ class EditDialog(tk.Toplevel):
         tk.Button(bf, text="✔ Save", bg=ACC3, fg=BG,
                   command=self._save, **bc).pack(side="left", padx=6)
         tk.Button(bf, text="✕ Cancel", bg=BG3, fg=FG,
-                  command=self.destroy, **bc).pack(side="left")
+                  command=self.destroy, **bc).pack(side="left", padx=6)
+        tk.Button(bf, text="🗑 Delete", bg=WARN, fg=BG,
+                  command=self._delete, **bc).pack(side="left")
+
+    def _delete(self):
+        if not messagebox.askyesno("Delete",
+                f"Delete QSO #{self.row['id']} with {self.row['call']} on {self.row['date']}?",
+                parent=self):
+            return
+        self.conn.execute("DELETE FROM qso WHERE id=?", (self.row["id"],))
+        self.conn.commit()
+        rewrite_adif(self.adif_path, self.conn, self.mycall.upper())
+        load_adif_into_index(self.adif_path, self.conn)
+        self.refresh_cb()
+        self.destroy()
 
     def _save(self):
         vals = {k: w.get().strip() for k, w in self._entries.items()}
@@ -4149,13 +4817,20 @@ class StationDialog(tk.Toplevel):
                 sticky="e",padx=(12,6),pady=6)
             w=tk.Entry(self,width=20,**ent); w.insert(0,cfg.get(key,""))
             w.grid(row=i,column=1,padx=(0,12),pady=6); self._entries[key]=w
-        bf=tk.Frame(self,bg=BG); bf.grid(row=2,column=0,columnspan=2,pady=10)
+        tk.Label(self,text="License Class",**lbl).grid(row=len(fields),column=0,
+            sticky="e",padx=(12,6),pady=6)
+        self._lic_cb=ttk.Combobox(self,values=["Technician","General","Extra"],
+            state="readonly",width=18,font=MONO)
+        self._lic_cb.set(cfg.get("license_class","Extra"))
+        self._lic_cb.grid(row=len(fields),column=1,padx=(0,12),pady=6)
+        bf=tk.Frame(self,bg=BG); bf.grid(row=len(fields)+1,column=0,columnspan=2,pady=10)
         bc=dict(font=SM,relief="flat",cursor="hand2",pady=4,padx=12)
         tk.Button(bf,text="✔ Save",bg=ACC3,fg=BG,command=self._save,**bc).pack(side="left",padx=6)
         tk.Button(bf,text="✕ Cancel",bg=BG3,fg=FG,command=self.destroy,**bc).pack(side="left")
     def _save(self):
         for key,w in self._entries.items():
             self.cfg[key]=w.get().strip().upper()
+        self.cfg["license_class"]=self._lic_cb.get()
         save_config(self.cfg); self.parent._update_mycall_lbl(); self.destroy()
 
 
@@ -4206,17 +4881,43 @@ class FlrigDialog(tk.Toplevel):
         lbl=dict(bg=BG,fg=FG2,font=SM)
         tk.Label(self,text="Flrig Host:",**lbl).grid(row=0,column=0,sticky="e",padx=(12,6),pady=6)
         self.e_host=tk.Entry(self,width=20,**ent); self.e_host.insert(0,cfg.get("flrig_host","127.0.0.1"))
-        self.e_host.grid(row=0,column=1,padx=(0,12),pady=6)
+        self.e_host.grid(row=0,column=1,columnspan=2,padx=(0,12),pady=6,sticky="w")
         tk.Label(self,text="Flrig Port:",**lbl).grid(row=1,column=0,sticky="e",padx=(12,6),pady=6)
         self.e_port=tk.Entry(self,width=8,**ent); self.e_port.insert(0,str(cfg.get("flrig_port",12345)))
-        self.e_port.grid(row=1,column=1,padx=(0,12),pady=6,sticky="w")
+        self.e_port.grid(row=1,column=1,columnspan=2,padx=(0,12),pady=6,sticky="w")
+        # Auto-start option
+        self._autostart_var=tk.BooleanVar(value=cfg.get("flrig_autostart",False))
+        tk.Checkbutton(self,text="Auto-start flrig on launch / close on exit",
+                       variable=self._autostart_var,bg=BG,fg=FG2,selectcolor=BG3,
+                       activebackground=BG,activeforeground=FG,font=SM,
+                       command=self._toggle_path_state
+                       ).grid(row=2,column=0,columnspan=3,sticky="w",padx=(12,6),pady=(8,2))
+        tk.Label(self,text="Flrig Path:",**lbl).grid(row=3,column=0,sticky="e",padx=(12,6),pady=4)
+        self.e_path=tk.Entry(self,width=28,**ent); self.e_path.insert(0,cfg.get("flrig_exe_path",""))
+        self.e_path.grid(row=3,column=1,padx=(0,4),pady=4,sticky="w")
+        self._browse_btn=tk.Button(self,text="Browse…",bg=BG4,fg=FG,font=SM,relief="flat",
+                                   cursor="hand2",padx=6,pady=2,command=self._browse)
+        self._browse_btn.grid(row=3,column=2,padx=(0,12),pady=4,sticky="w")
+        self._toggle_path_state()
         self._tl=tk.Label(self,text="",bg=BG,fg=FG2,font=SM)
-        self._tl.grid(row=2,column=0,columnspan=2)
-        bf=tk.Frame(self,bg=BG); bf.grid(row=3,column=0,columnspan=2,pady=10)
+        self._tl.grid(row=4,column=0,columnspan=3)
+        bf=tk.Frame(self,bg=BG); bf.grid(row=5,column=0,columnspan=3,pady=10)
         bc=dict(font=SM,relief="flat",cursor="hand2",pady=4,padx=12)
         tk.Button(bf,text="⟳ Test",bg=BG4,fg=FG,command=self._test,**bc).pack(side="left",padx=6)
         tk.Button(bf,text="✔ Save",bg=ACC3,fg=BG,command=self._save,**bc).pack(side="left",padx=6)
         tk.Button(bf,text="✕ Cancel",bg=BG3,fg=FG,command=self.destroy,**bc).pack(side="left")
+    def _toggle_path_state(self):
+        state = "normal" if self._autostart_var.get() else "disabled"
+        self.e_path.config(state=state)
+        self._browse_btn.config(state=state)
+    def _browse(self):
+        import sys
+        filetypes = [("Executable", "*.exe"), ("All files", "*.*")] if sys.platform == "win32" \
+                    else [("All files", "*.*")]
+        path = filedialog.askopenfilename(title="Select flrig executable", filetypes=filetypes)
+        if path:
+            self.e_path.delete(0, "end")
+            self.e_path.insert(0, path)
     def _test(self):
         host=self.e_host.get().strip()
         try: port=int(self.e_port.get().strip())
@@ -4232,6 +4933,8 @@ class FlrigDialog(tk.Toplevel):
         self.cfg["flrig_host"]=self.e_host.get().strip()
         try: self.cfg["flrig_port"]=int(self.e_port.get().strip())
         except ValueError: pass
+        self.cfg["flrig_autostart"]=self._autostart_var.get()
+        self.cfg["flrig_exe_path"]=self.e_path.get().strip()
         save_config(self.cfg); self.destroy()
 
 

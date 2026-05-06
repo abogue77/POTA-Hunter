@@ -58,6 +58,21 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR"
 cp "$SCRIPT_DIR/hamlog.pyw" "$INSTALL_DIR/hamlog.pyw"
 echo "Installed hamlog.pyw -> $INSTALL_DIR/hamlog.pyw"
 
+# 4b. Install icon
+ICON_SRC="$SCRIPT_DIR/assets/icon.png"
+ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+ICON_DST="$ICON_DIR/hamlog.png"
+if [ -f "$ICON_SRC" ]; then
+    mkdir -p "$ICON_DIR"
+    cp "$ICON_SRC" "$ICON_DST"
+    echo "Installed icon        -> $ICON_DST"
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
+else
+    echo "WARNING: assets/icon.png not found — skipping icon install"
+fi
+
 # 5. Create launcher script
 cat > "$BIN_DIR/$APP_NAME" <<EOF
 #!/usr/bin/env bash
@@ -75,6 +90,7 @@ Exec=$BIN_DIR/$APP_NAME
 Terminal=false
 Type=Application
 Categories=HamRadio;Utility;
+Icon=hamlog
 EOF
 echo "Created desktop entry -> $DESKTOP_DIR/hamlog.desktop"
 

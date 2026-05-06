@@ -36,7 +36,8 @@ Click a row to:
 |-----------|---------|
 | Normal | Unworked activator |
 | Highlighted Green| Activator already logged in this session |
-| Highlighted Blue| Radio tuned to activator |
+| Highlighted Blue| Radio (Flrig) tuned to activator |
+
 
 ---
 

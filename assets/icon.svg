@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+
+  <!-- Trunk -->
+  <rect x="111" y="193" width="34" height="36" rx="5" fill="#5C3D1E"/>
+
+  <!-- Tree: two bold tiers, high contrast -->
+  <!-- Bottom tier (wide, dark) -->
+  <polygon points="128,100 56,205 200,205" fill="#1A6B30"/>
+  <!-- Top tier (narrower, lighter) -->
+  <polygon points="128,58 82,122 174,122" fill="#28924A"/>
+
+  <!-- Radio arcs — thick, bold, centered on treetip -->
+  <path d="M 96 65 A 32 32 0 0 1 160 65"
+        fill="none" stroke="#2171B5" stroke-width="13" stroke-linecap="round"/>
+  <path d="M 72 48 A 57 57 0 0 1 184 48"
+        fill="none" stroke="#2171B5" stroke-width="13" stroke-linecap="round"/>
+
+  <!-- Dot at apex -->
+  <circle cx="128" cy="65" r="10" fill="#2171B5"/>
+
+</svg>
