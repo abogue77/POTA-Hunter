@@ -25,6 +25,7 @@ A Python-based desktop application for amateur radio operators participating in 
 - Fields for callsign, RST sent/received, park reference, comments, and notes
 - ADIF import and export
 - SQLite-backed fast search, filter, and sort by callsign, band, mode, or date
+- Multi-Op button saves park number for repeat log
 
 ### Park Database
 - Synced from the official POTA parks CSV
@@ -38,6 +39,11 @@ A Python-based desktop application for amateur radio operators participating in 
 - Maidenhead grid square visualization with world coastlines
 - Interactive hover tooltips
 - Browser-based map export
+
+### Activator Mode
+- Designated Activator Mode allows for quick logging when activating a park
+- Self-spot feature
+- Call sign database lookup auto fills name and location
 
 ---
 
