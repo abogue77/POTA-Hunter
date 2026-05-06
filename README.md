@@ -18,7 +18,7 @@ A Python-based desktop application for amateur radio operators participating in 
 - Connects to [Flrig](http://www.w1hkj.com/files/flrig/) via XML-RPC
 - Displays live VFO frequency, mode, and band
 - S-meter and power meter
-- PTT state detection
+- PTT state detection (auto scan stop when detected)
 
 ### QSO Logging
 - UTC timestamp auto-fill
