@@ -11,7 +11,7 @@ truncates the file — discarding PyInstaller's appended archive. This script:
 import subprocess, pefile, sys, os
 
 ROOT   = os.path.dirname(os.path.abspath(__file__))
-EXE    = os.path.join(ROOT, "dist", "POTA-Logger.exe")
+EXE    = os.path.join(ROOT, "dist", "POTA-Hunter.exe")
 ICO    = os.path.join(ROOT, "assets", "icon.ico")
 RCEDIT = os.path.join(ROOT, "rcedit-x64.exe")
 

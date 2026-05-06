@@ -1,4 +1,4 @@
-('C:\\Users\\User\\Git_Clone\\POTA-Logger\\build\\POTA-Logger\\POTA-Logger.pkg',
+('C:\\Users\\User\\Git_Clone\\POTA-Logger\\build\\POTA-Logger\\POTA-Hunter.pkg',
  {'BINARY': True,
   'DATA': True,
   'EXECUTABLE': True,

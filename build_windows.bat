@@ -7,7 +7,7 @@ echo Generating icon files...
 python assets\make_icon.py
 echo.
 
-echo Building POTA-Logger.exe...
+echo Building POTA-Hunter.exe...
 pyinstaller --noconfirm POTA-Logger.spec
 echo.
 
@@ -20,5 +20,5 @@ echo Embedding icon (preserving PyInstaller payload)...
 python embed_icon.py
 echo.
 
-echo Build complete. Executable is in: dist\POTA-Logger.exe
+echo Build complete. Executable is in: dist\POTA-Hunter.exe
 pause
