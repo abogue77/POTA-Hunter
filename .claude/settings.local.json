@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:\\\\Users\\\\User\\\\Git_Clone\\\\POTA-Logger\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\User\\\\Git_Clone\\\\POTA-Logger\" diff --stat)"
+    ]
+  }
+}
