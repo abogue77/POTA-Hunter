@@ -10,8 +10,8 @@ A Python-based desktop application for amateur radio operators participating in 
 
 ### Live POTA Spot Monitoring
 - Pulls real-time activator spots from the POTA API
-- Filter spots by band and mode
-- Configurable auto-scan interval
+- Filter spots by band and mode, operator class, ITU Region, and Hide QRT
+- Scan active ststions with configurable auto-scan interval, and skip logged for fast hunting. 
 - Tracks which stations you have already worked
 
 ### Transceiver Control (Flrig)
