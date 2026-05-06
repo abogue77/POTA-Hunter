@@ -43,7 +43,25 @@ A Python-based desktop application for amateur radio operators participating in 
 
 ## Screenshots
 
-_Add screenshots here_
+
+
+
+
+
+<img width="1896" height="942" alt="image" src="https://github.com/user-attachments/assets/2fb4b5c5-bee9-40d0-8ed4-d2a57f512218" />
+
+<img width="1591" height="894" alt="image" src="https://github.com/user-attachments/assets/4ff08cff-bb17-475b-a478-5cbc2335013a" />
+
+<img width="1230" height="803" alt="image" src="https://github.com/user-attachments/assets/c68876d9-73e9-4526-b87b-c8e4d9b050b1" />
+
+<img width="1912" height="947" alt="image" src="https://github.com/user-attachments/assets/b6f3eb6f-571e-48ae-a6c9-bedeaf531da1" />
+
+<img width="1906" height="951" alt="image" src="https://github.com/user-attachments/assets/6774f8f3-e075-4676-9127-cf981eb23408" />
+
+<img width="1904" height="950" alt="image" src="https://github.com/user-attachments/assets/66b279ba-1ec8-49f1-92f8-1ddc47193297" />
+
+<img width="1918" height="908" alt="image" src="https://github.com/user-attachments/assets/765b761b-141f-49ed-993b-e6dfa6901bb7" />
+
 
 ---
 
