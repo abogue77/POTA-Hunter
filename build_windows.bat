@@ -3,6 +3,10 @@ echo Checking for PyInstaller...
 pip show pyinstaller >nul 2>&1 || pip install pyinstaller
 echo.
 
+echo Installing audio and hotkey dependencies...
+pip install sounddevice numpy pynput
+echo.
+
 echo Generating icon files...
 python assets\make_icon.py
 echo.

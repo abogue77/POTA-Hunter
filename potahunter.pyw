@@ -29,6 +29,21 @@ import tempfile
 import webbrowser
 import http.server
 import socketserver
+import sys
+import wave
+
+try:
+    import sounddevice as sd
+    import numpy as np
+    _AUDIO_OK = True
+except ImportError:
+    _AUDIO_OK = False
+
+try:
+    from pynput import keyboard as _pynput_kb
+    _PYNPUT_OK = True
+except ImportError:
+    _PYNPUT_OK = False
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 LOGBOOK_DIR = os.path.join(os.path.expanduser("~"), "POTA-Hunter")
@@ -66,6 +81,14 @@ DEFAULT_CONFIG = {
     "license_class":          "Extra",
     "flrig_autostart":        False,
     "flrig_exe_path":         "",
+    "vk_labels": {
+        "F1": "CQ CQ CQ", "F2": "My Call", "F3": "Report",
+        "F4": "Name / QTH", "F5": "73", "F6": "", "F7": "", "F8": "", "F9": "",
+    },
+    "vk_ptt_enabled":     False,
+    "vk_ptt_delay_ms":    200,
+    "vk_input_device":    "",
+    "vk_output_device":   "",
 }
 
 def load_config():
@@ -623,6 +646,18 @@ def flrig_set_freq_and_mode(host, port, freq_hz, spot_mode=""):
         return True
     except Exception as e:
         return str(e)
+
+def flrig_set_ptt(host, port, state: bool) -> bool:
+    """Assert (state=True) or release (state=False) PTT via Flrig XML-RPC."""
+    try:
+        proxy = xmlrpc.client.ServerProxy(
+            f"http://{host}:{port}/RPC2",
+            transport=_TimeoutTransport(timeout=2.0),
+            allow_none=True)
+        proxy.rig.set_ptt(1 if state else 0)
+        return True
+    except Exception:
+        return False
 
 # ── POTA spot posting ─────────────────────────────────────────────────────────
 def pota_post_spot(activator, spotter, reference, freq_khz, mode, comment=""):
@@ -1389,6 +1424,11 @@ class POTAHunter(tk.Tk):
         self._map_my_px         = None
         self._map_tuned_pxs     = []
 
+        self._vk_dir      = os.path.join(LOGBOOK_DIR, "voice_keyer")
+        os.makedirs(self._vk_dir, exist_ok=True)
+        self._vk_window   = None
+        self._vk_listener = None
+
         self._style_ttk()
         self._build_menu()
         self._build_ui()
@@ -1408,6 +1448,7 @@ class POTAHunter(tk.Tk):
         self._maybe_start_flrig()
         self.after(1500, self._check_parks_db_on_startup)
         self.after(2000, self._check_fcc_db_on_startup)
+        self._start_vk_hotkey_listener()
 
     # ── TTK style ─────────────────────────────────────────────────────────
     def _style_ttk(self):
@@ -1472,6 +1513,8 @@ class POTAHunter(tk.Tk):
                        if self.cfg.get("theme", "dark") == "dark"
                        else "☾ Switch to Dark Mode")
         sm.add_command(label=theme_label, command=self._switch_theme)
+        tm = menu("Tools")
+        tm.add_command(label="Voice Keyer…", command=self._open_voice_keyer)
         hm = menu("Help")
         hm.add_command(label="About", command=self._about)
 
@@ -4685,6 +4728,35 @@ function clearLogModal(){
             "Storage    : native ADIF (.adi) per logbook\n\n"
             "Logbooks folder: " + LOGBOOK_DIR)
 
+    # ── Voice Keyer ───────────────────────────────────────────────────────
+    def _open_voice_keyer(self):
+        if self._vk_window and self._vk_window.winfo_exists():
+            self._vk_window.lift()
+            return
+        self._vk_window = VoiceKeyerWindow(self)
+
+    def _start_vk_hotkey_listener(self):
+        if not _PYNPUT_OK:
+            return
+        _fkey_map = {
+            _pynput_kb.Key.f1: "F1", _pynput_kb.Key.f2: "F2",
+            _pynput_kb.Key.f3: "F3", _pynput_kb.Key.f4: "F4",
+            _pynput_kb.Key.f5: "F5", _pynput_kb.Key.f6: "F6",
+            _pynput_kb.Key.f7: "F7", _pynput_kb.Key.f8: "F8",
+            _pynput_kb.Key.f9: "F9",
+        }
+        def _on_press(key):
+            label = _fkey_map.get(key)
+            if label and self._vk_window and self._vk_window.winfo_exists():
+                self.after(0, lambda k=label: self._vk_window.play(k))
+        try:
+            listener = _pynput_kb.Listener(on_press=_on_press)
+            listener.daemon = True
+            listener.start()
+            self._vk_listener = listener
+        except Exception:
+            pass
+
     def destroy(self):
         if self._flrig_proc_owned and self._flrig_proc and self._flrig_proc.poll() is None:
             self._flrig_proc.terminate()
@@ -4700,8 +4772,348 @@ function clearLogModal(){
             threading.Thread(target=self._map_server.shutdown, daemon=True).start()
         if self.conn:
             self.conn.close()
+        if self._vk_listener:
+            try:
+                self._vk_listener.stop()
+            except Exception:
+                pass
+        if self._vk_window:
+            try:
+                self._vk_window.destroy()
+            except Exception:
+                pass
         save_config(self.cfg)
         super().destroy()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+class VoiceKeyerSettingsDialog(tk.Toplevel):
+    """Configure audio devices and PTT options for the voice keyer."""
+    def __init__(self, parent, cfg):
+        super().__init__(parent)
+        self.title("Voice Keyer Settings")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self.cfg = cfg
+        ent = dict(bg=BG3, fg=FG, font=MONO, relief="flat", insertbackground=ACCENT, bd=4)
+        lbl = dict(bg=BG, fg=FG2, font=SM)
+
+        self._ptt_var = tk.BooleanVar(value=cfg.get("vk_ptt_enabled", False))
+        tk.Checkbutton(self, text="Enable PTT via Flrig during playback",
+                       variable=self._ptt_var, bg=BG, fg=FG2, selectcolor=BG3,
+                       activebackground=BG, activeforeground=FG,
+                       font=SM).grid(row=0, column=0, columnspan=2,
+                                     sticky="w", padx=12, pady=(12, 4))
+
+        tk.Label(self, text="PTT key-up delay (ms):", **lbl).grid(
+            row=1, column=0, sticky="e", padx=(12, 6), pady=4)
+        self._e_delay = tk.Entry(self, width=8, **ent)
+        self._e_delay.insert(0, str(cfg.get("vk_ptt_delay_ms", 200)))
+        self._e_delay.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        devices = self._get_devices()
+        in_devs  = [""] + [d["name"] for d in devices if d["max_input_channels"]  > 0]
+        out_devs = [""] + [d["name"] for d in devices if d["max_output_channels"] > 0]
+
+        tk.Label(self, text="Input device:", **lbl).grid(
+            row=2, column=0, sticky="e", padx=(12, 6), pady=4)
+        self._in_var = tk.StringVar(value=cfg.get("vk_input_device", ""))
+        ttk.Combobox(self, textvariable=self._in_var, values=in_devs,
+                     width=32, state="readonly").grid(
+            row=2, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        tk.Label(self, text="Output device:", **lbl).grid(
+            row=3, column=0, sticky="e", padx=(12, 6), pady=4)
+        self._out_var = tk.StringVar(value=cfg.get("vk_output_device", ""))
+        ttk.Combobox(self, textvariable=self._out_var, values=out_devs,
+                     width=32, state="readonly").grid(
+            row=3, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        if not _AUDIO_OK:
+            tk.Label(self,
+                     text="⚠ sounddevice not installed\n"
+                          "Run: pip install sounddevice numpy",
+                     bg=BG, fg=WARN, font=SM, justify="left").grid(
+                row=4, column=0, columnspan=2, padx=12, pady=4, sticky="w")
+
+        bf = tk.Frame(self, bg=BG)
+        bf.grid(row=5, column=0, columnspan=2, pady=10)
+        bc = dict(font=SM, relief="flat", cursor="hand2", pady=4, padx=12)
+        tk.Button(bf, text="✔ Save",   bg=ACC3, fg=BG, command=self._save, **bc).pack(side="left", padx=6)
+        tk.Button(bf, text="✕ Cancel", bg=BG3,  fg=FG, command=self.destroy, **bc).pack(side="left")
+
+    def _get_devices(self):
+        if not _AUDIO_OK:
+            return []
+        try:
+            return list(sd.query_devices())
+        except Exception:
+            return []
+
+    def _save(self):
+        self.cfg["vk_ptt_enabled"] = self._ptt_var.get()
+        try:
+            self.cfg["vk_ptt_delay_ms"] = int(self._e_delay.get().strip())
+        except ValueError:
+            pass
+        self.cfg["vk_input_device"]  = self._in_var.get()
+        self.cfg["vk_output_device"] = self._out_var.get()
+        save_config(self.cfg)
+        self.destroy()
+
+
+class VoiceKeyerWindow(tk.Toplevel):
+    """Floating voice keyer — pre-record F1-F9 messages and play via hotkey."""
+
+    _KEYS = [f"F{i}" for i in range(1, 10)]
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Voice Keyer")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._app = parent
+        self._recording_key = None
+        self._playing_key   = None
+        self._stop_event    = threading.Event()
+
+        self._lbl_widgets    = {}
+        self._status_widgets = {}
+        self._rec_btns       = {}
+        self._play_btns      = {}
+
+        self._build_ui()
+        self._update_indicators()
+
+    # ── paths ──────────────────────────────────────────────────────────────
+    def _wav_path(self, key):
+        return os.path.join(self._app._vk_dir, f"{key}.wav")
+
+    def _has_recording(self, key):
+        return os.path.exists(self._wav_path(key))
+
+    # ── UI ─────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        ent = dict(bg=BG3, fg=FG, font=SM, relief="flat",
+                   insertbackground=ACCENT, bd=2)
+        labels = self._app.cfg.get("vk_labels", {})
+
+        for i, key in enumerate(self._KEYS):
+            tk.Label(self, text=key, width=3, bg=BG, fg=ACCENT,
+                     font=LBL, anchor="e").grid(
+                row=i, column=0, padx=(8, 4), pady=2, sticky="e")
+
+            e = tk.Entry(self, width=22, **ent)
+            e.insert(0, labels.get(key, ""))
+            e.grid(row=i, column=1, padx=(0, 4), pady=2)
+            e.bind("<FocusOut>", lambda ev, k=key, w=e: self._save_label(k, w))
+            self._lbl_widgets[key] = e
+
+            s = tk.Label(self, text="○", width=2, bg=BG, fg=FG2, font=SM)
+            s.grid(row=i, column=2, padx=2, pady=2)
+            self._status_widgets[key] = s
+
+            rb = tk.Button(self, text="● Rec", bg=BG3, fg=WARN, font=SM,
+                           relief="flat", cursor="hand2", padx=6,
+                           command=lambda k=key: self._start_record(k))
+            rb.grid(row=i, column=3, padx=2, pady=2)
+            self._rec_btns[key] = rb
+
+            pb = tk.Button(self, text="▶ Play", bg=BG3, fg=ACC3, font=SM,
+                           relief="flat", cursor="hand2", padx=6,
+                           command=lambda k=key: self.play(k))
+            pb.grid(row=i, column=4, padx=2, pady=2)
+            self._play_btns[key] = pb
+
+            tk.Button(self, text="✕", bg=BG3, fg=FG2, font=SM,
+                      relief="flat", cursor="hand2", padx=4,
+                      command=lambda k=key: self._clear(k)).grid(
+                row=i, column=5, padx=(2, 8), pady=2)
+
+        bot = tk.Frame(self, bg=BG)
+        bot.grid(row=len(self._KEYS), column=0, columnspan=6, pady=8)
+        bc = dict(font=SM, relief="flat", cursor="hand2", padx=8, pady=3)
+        tk.Button(bot, text="■ Stop", bg=BG4, fg=WARN,
+                  command=self._stop, **bc).pack(side="left", padx=6)
+        self._status_lbl = tk.Label(bot, text="Ready", bg=BG, fg=FG2, font=SM)
+        self._status_lbl.pack(side="left", padx=6)
+        tk.Button(bot, text="⚙ Settings", bg=BG4, fg=FG,
+                  command=self._open_settings, **bc).pack(side="right", padx=6)
+
+        if not _AUDIO_OK:
+            tk.Label(self,
+                     text="⚠ sounddevice not installed — run: pip install sounddevice numpy",
+                     bg=BG, fg=WARN, font=SM).grid(
+                row=len(self._KEYS) + 1, column=0, columnspan=6, pady=(0, 6))
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    def _save_label(self, key, widget):
+        self._app.cfg.setdefault("vk_labels", {})[key] = widget.get()
+        save_config(self._app.cfg)
+
+    def _update_indicators(self):
+        for key in self._KEYS:
+            if self._has_recording(key):
+                self._status_widgets[key].config(text="●", fg=ACC3)
+            else:
+                self._status_widgets[key].config(text="○", fg=FG2)
+
+    def _set_status(self, text, color=None):
+        self.after(0, lambda: self._status_lbl.config(
+            text=text, fg=color if color else FG2))
+
+    # ── record ─────────────────────────────────────────────────────────────
+    def _start_record(self, key):
+        if not _AUDIO_OK:
+            messagebox.showwarning(
+                "No Audio",
+                "sounddevice is not installed.\nRun: pip install sounddevice numpy",
+                parent=self)
+            return
+        if self._recording_key or self._playing_key:
+            return
+        self._recording_key = key
+        self._stop_event.clear()
+        self._set_status(f"Recording {key}…", WARN)
+        self._rec_btns[key].config(bg=WARN, fg=BG)
+        threading.Thread(target=self._record_thread,
+                         args=(key,), daemon=True).start()
+
+    def _record_thread(self, key):
+        path = self._wav_path(key)
+        samplerate = 44100
+        dev = self._resolve_device("vk_input_device", input=True)
+        frames = []
+        try:
+            with sd.InputStream(samplerate=samplerate, channels=1,
+                                device=dev, dtype="int16") as stream:
+                while not self._stop_event.is_set():
+                    data, _ = stream.read(1024)
+                    frames.append(data.copy())
+        except Exception as exc:
+            self.after(0, lambda: self._set_status(f"Rec error: {exc}", WARN))
+            self._recording_key = None
+            self.after(0, lambda k=key: self._rec_btns[k].config(bg=BG3, fg=WARN))
+            return
+
+        if frames:
+            audio = np.concatenate(frames)
+            try:
+                with wave.open(path, "w") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(samplerate)
+                    wf.writeframes(audio.tobytes())
+            except Exception as exc:
+                self.after(0, lambda: self._set_status(f"Save error: {exc}", WARN))
+
+        self._recording_key = None
+        def _done(k=key):
+            self._rec_btns[k].config(bg=BG3, fg=WARN)
+            self._update_indicators()
+            self._status_lbl.config(text="Ready", fg=FG2)
+        self.after(0, _done)
+
+    # ── play ───────────────────────────────────────────────────────────────
+    def play(self, key):
+        if not _AUDIO_OK:
+            messagebox.showwarning(
+                "No Audio",
+                "sounddevice is not installed.\nRun: pip install sounddevice numpy",
+                parent=self)
+            return
+        if self._playing_key or self._recording_key:
+            return
+        path = self._wav_path(key)
+        if not os.path.exists(path):
+            self._set_status(f"No recording for {key}", WARN)
+            return
+        self._playing_key = key
+        self._stop_event.clear()
+        self._set_status(f"TX {key}…", ACC3)
+        self._play_btns[key].config(bg=ACC3, fg=BG)
+        threading.Thread(target=self._play_thread,
+                         args=(key, path), daemon=True).start()
+
+    def _play_thread(self, key, path):
+        host    = self._app.cfg.get("flrig_host", "127.0.0.1")
+        port    = self._app.cfg.get("flrig_port", 12345)
+        ptt_en  = self._app.cfg.get("vk_ptt_enabled", False)
+        delay   = self._app.cfg.get("vk_ptt_delay_ms", 200) / 1000.0
+        dev     = self._resolve_device("vk_output_device", input=False)
+
+        if ptt_en:
+            flrig_set_ptt(host, port, True)
+            time.sleep(delay)
+        try:
+            with wave.open(path) as wf:
+                raw  = wf.readframes(wf.getnframes())
+                rate = wf.getframerate()
+                ch   = wf.getnchannels()
+                sw   = wf.getsampwidth()
+            dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sw, np.int16)
+            audio = np.frombuffer(raw, dtype=dtype)
+            if ch > 1:
+                audio = audio.reshape(-1, ch)
+            sd.play(audio, samplerate=rate, device=dev, blocking=True)
+        except Exception as exc:
+            self.after(0, lambda: self._set_status(f"Play error: {exc}", WARN))
+        finally:
+            if ptt_en:
+                flrig_set_ptt(host, port, False)
+            self._playing_key = None
+            def _done(k=key):
+                self._play_btns[k].config(bg=BG3, fg=ACC3)
+                self._status_lbl.config(text="Ready", fg=FG2)
+            self.after(0, _done)
+
+    # ── stop ───────────────────────────────────────────────────────────────
+    def _stop(self):
+        self._stop_event.set()
+        if _AUDIO_OK:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+    # ── clear ──────────────────────────────────────────────────────────────
+    def _clear(self, key):
+        path = self._wav_path(key)
+        if not os.path.exists(path):
+            return
+        if messagebox.askyesno("Clear Recording",
+                               f"Delete the recording for {key}?", parent=self):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            self._update_indicators()
+
+    # ── device resolution ──────────────────────────────────────────────────
+    def _resolve_device(self, cfg_key, input=True):
+        name = self._app.cfg.get(cfg_key, "")
+        if not name or not _AUDIO_OK:
+            return None
+        try:
+            key_ch = "max_input_channels" if input else "max_output_channels"
+            for i, d in enumerate(sd.query_devices()):
+                if d["name"] == name and d[key_ch] > 0:
+                    return i
+        except Exception:
+            pass
+        return None
+
+    # ── settings ───────────────────────────────────────────────────────────
+    def _open_settings(self):
+        VoiceKeyerSettingsDialog(self, self._app.cfg)
+
+    def _on_close(self):
+        self._stop()
+        self._app._vk_window = None
+        self.destroy()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

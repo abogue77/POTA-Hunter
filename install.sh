@@ -51,6 +51,15 @@ fi
 
 echo "Tkinter OK"
 
+# 2b. Install audio and hotkey dependencies
+echo "Installing audio and hotkey dependencies (sounddevice, numpy, pynput)..."
+if python3 -m pip install sounddevice numpy pynput --quiet; then
+    echo "Audio dependencies OK"
+else
+    echo "WARNING: Could not install sounddevice/numpy/pynput — voice keyer will be unavailable."
+    echo "         Run manually: pip3 install sounddevice numpy pynput"
+fi
+
 # 3. Create install directories
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR"
 
