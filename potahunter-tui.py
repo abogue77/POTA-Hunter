@@ -21,6 +21,8 @@ import io
 import re
 import pathlib
 import dataclasses
+import subprocess
+import sys
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -52,6 +54,41 @@ LOGBOOK_DIR   = pathlib.Path.home() / "POTA-Hunter"
 CONFIG_FILE   = LOGBOOK_DIR / "config.json"
 PARKS_DB      = LOGBOOK_DIR / "pota_parks.db"
 FCC_DB        = LOGBOOK_DIR / "fcc_calls.db"
+# ── Linux / GNOME Terminal F-key fix ─────────────────────────────────────────
+_GNOME_SCHEMA = "org.gnome.Terminal.Legacy.Settings"
+_GNOME_KEY    = "menu-accelerator-enabled"
+
+def _disable_gnome_fkey_grab() -> bool:
+    """Disable GNOME Terminal's F10 menu accelerator; returns True if we changed it."""
+    if sys.platform != "linux":
+        return False
+    try:
+        r = subprocess.run(
+            ["gsettings", "get", _GNOME_SCHEMA, _GNOME_KEY],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0 and r.stdout.strip() == "true":
+            subprocess.run(
+                ["gsettings", "set", _GNOME_SCHEMA, _GNOME_KEY, "false"],
+                capture_output=True, timeout=2,
+            )
+            return True
+    except Exception:
+        pass
+    return False
+
+def _restore_gnome_fkey_grab(was_enabled: bool):
+    """Restore GNOME Terminal's F10 accelerator if we had disabled it."""
+    if not was_enabled:
+        return
+    try:
+        subprocess.run(
+            ["gsettings", "set", _GNOME_SCHEMA, _GNOME_KEY, "true"],
+            capture_output=True, timeout=2,
+        )
+    except Exception:
+        pass
+
 PARKS_CSV_URL = "https://pota.app/all_parks_ext.csv"
 FCC_ZIP_URLS  = [
     "https://data.fcc.gov/download/pub/uls/complete/l_amat.zip",
@@ -1711,8 +1748,7 @@ class FilterBar:
 
 class HelpBar:
     TEXT = ("F1:Focus  F2:Log  F3:Tune  F4:Respot  F5:Refresh  F6:Scan  "
-            "F7:Logbook  F8:PostSpot  F9:Config  F10:DBTools  F12:ActMode  ?:Help  q:Quit"
-            "  (1-9/0/` = F1-F9/F10/F12)")
+            "F7:Logbook  F8:PostSpot  F9:Config  F10:DBTools  F12:ActMode  ?:Help  q:Quit")
 
     def __init__(self, win):
         self.win = win
@@ -1975,18 +2011,17 @@ class ModalDialog:
         lines = [
             "POTA Hunter TUI — Keyboard Reference",
             "",
-            "F1  / 1     Cycle focus: form → spots → log → form",
-            "F2  / 2     Log QSO (stamps UTC, reads Flrig freq/mode)",
-            "F3  / 3     Tune Flrig to selected spot",
-            "F4  / 4     Respot selected activator to POTA API",
-            "F5  / 5     Force-refresh POTA spot list",
-            "F6  / 6     Toggle auto-scan on/off",
-            "F7  / 7     Logbook menu (new / open / close)",
-            "F8  / 8     Post my own activation spot",
-            "F9  / 9     Open config editor",
-            "F10 / 0     Database tools (build Parks / FCC callsign DB)",
-            "F12 / `     Toggle Activator mode (locks park, rapid logging)",
-            "(Number keys work when focus is not on the QSO form)",
+            "F2 / Enter  Log QSO (stamps UTC, reads Flrig freq/mode)",
+            "F3          Tune Flrig to selected spot",
+            "F4          Respot selected activator to POTA API",
+            "F5          Force-refresh POTA spot list",
+            "F6          Toggle auto-scan on/off",
+            "F7          Logbook menu (new / open / close)",
+            "F8          Post my own activation spot",
+            "F9          Open config editor",
+            "F10         Database tools (build Parks / FCC callsign DB)",
+            "F12         Toggle Activator mode (locks park, rapid logging)",
+            "F1          Cycle focus: form → spots → log → form",
             "Tab/Down    Next field in QSO form",
             "Shift-Tab/Up  Previous field in QSO form",
             "Enter       (spot list) Tune + fill form",
@@ -2093,7 +2128,7 @@ class PotaHunterTUI:
             self._open_logbook(pathlib.Path(last))
 
         if not parks_db_exists():
-            self._set_status("Parks DB not found — press F10 or 0 to build it.", "warn")
+            self._set_status("Parks DB not found — press F10 to build it.", "warn")
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -2370,24 +2405,6 @@ class PotaHunterTUI:
             self.cmd_toggle_activator_mode(); return True
         if ch == curses.KEY_F1:
             self._cycle_focus(forward=True); return True
-        # Number-key aliases for F-keys (Linux/GNOME intercepts some F-keys)
-        if self.focus != FOCUS_FORM:
-            if ch == ord('1'):
-                self._cycle_focus(forward=True); return True
-            if ch == ord('5'):
-                self.cmd_refresh_spots(); return True
-            if ch == ord('6'):
-                self.cmd_toggle_scan(); return True
-            if ch == ord('7'):
-                self.cmd_logbook_menu(); return True
-            if ch == ord('8'):
-                self.cmd_post_my_spot(); return True
-            if ch == ord('9'):
-                self.cmd_config(); return True
-            if ch == ord('0'):
-                self.cmd_db_tools(); return True
-            if ch == ord('`'):
-                self.cmd_toggle_activator_mode(); return True
         if ch == ord('?') and self.focus != FOCUS_FORM:
             ModalDialog.help_overlay(self.stdscr); return True
         if ch == 18:  # Ctrl-R
@@ -2406,16 +2423,16 @@ class PotaHunterTUI:
                         self.lookup_worker.trigger(
                             str(spot.get("activator","") or ""))
                 return
-            if ch == curses.KEY_F2 or ch == ord('2'):
+            if ch == curses.KEY_F2:
                 self._stop_scan()
                 spot = self.w_spots.selected_spot()
                 if spot and self.w_form:
                     self.w_form.populate_from_spot(spot)
                 self.focus = FOCUS_FORM; return
-            if ch == curses.KEY_F3 or ch == ord('3'):
+            if ch == curses.KEY_F3:
                 spot = self.w_spots.selected_spot()
                 if spot: self.cmd_tune_to_spot(spot); return
-            if ch == curses.KEY_F4 or ch == ord('4'):
+            if ch == curses.KEY_F4:
                 spot = self.w_spots.selected_spot()
                 if spot: self.cmd_respot(spot); return
             if self.w_filter and self.w_filter.handle_key(ch, self.cfg):
@@ -2814,6 +2831,7 @@ class PotaHunterTUI:
 
 def main():
     cfg = load_config()
+    _fkey_grabbed = _disable_gnome_fkey_grab()
 
     # Attempt QRZ login in background if credentials exist
     if cfg.get("qrz_user") and cfg.get("qrz_pass"):
@@ -2827,6 +2845,7 @@ def main():
         pass
     finally:
         save_config(cfg)
+        _restore_gnome_fkey_grab(_fkey_grabbed)
 
 if __name__ == "__main__":
     main()
