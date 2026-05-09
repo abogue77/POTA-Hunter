@@ -1374,8 +1374,9 @@ class QSOForm:
     FIELD_MAXLEN = [20, 6, 6, 15, 50, 80]
     DEFAULT_RST  = ["", "59", "59", "", "", ""]
 
-    def __init__(self, win):
-        self.win = win
+    def __init__(self, win, title=" QSO Entry "):
+        self.win   = win
+        self.title = title
         self.fields = [
             TextField(self.FIELD_MAXLEN[i], self.FIELD_UPPER[i])
             for i in range(len(self.FIELD_NAMES))
@@ -1436,7 +1437,7 @@ class QSOForm:
         safe_addstr(win, H - 1, 0, B_BL, battr)
         hline(win, H - 1, 1, B_H, W - 2, battr)
         safe_addstr(win, H - 1, W - 1, B_BR, battr)
-        safe_addstr(win, 0, 2, " QSO Entry ", curses.color_pair(CP_TITLE) | curses.A_BOLD)
+        safe_addstr(win, 0, 2, self.title, curses.color_pair(CP_TITLE) | curses.A_BOLD)
 
         inner = W - 2
         lattr = curses.color_pair(CP_LABEL) | curses.A_BOLD
@@ -2036,10 +2037,11 @@ class ModalDialog:
 
 # ── Section 7: App controller ─────────────────────────────────────────────────
 
-FOCUS_SPOTS  = "spots"
-FOCUS_FORM   = "form"
-FOCUS_LOG    = "log"
-FOCUS_FILTER = "filter"
+FOCUS_SPOTS     = "spots"
+FOCUS_FORM      = "form"
+FOCUS_LOG       = "log"
+FOCUS_FILTER    = "filter"
+FOCUS_ACTIVATOR = "activator_popup"
 
 class PotaHunterTUI:
 
@@ -2058,7 +2060,10 @@ class PotaHunterTUI:
         self.focus          = FOCUS_SPOTS
         self._scan_enabled  = False
         self._last_auto_pop_idx: int = -1
-        self._activator_mode= False
+        self._activator_mode           = False
+        self._scan_paused_by_activator = False
+        self._activator_popup_win      = None
+        self._activator_popup_form     = None
 
         # Workers (started in run())
         self.flrig_poller   = FlrigPoller(self.event_queue, cfg)
@@ -2222,14 +2227,16 @@ class PotaHunterTUI:
                 self._do_tune(ev.freq_hz, ev.mode)
 
     def _check_idle_lookup(self):
-        if self.w_form and self.w_form.should_trigger_lookup():
-            call = self.w_form.callsign_value()
+        active_form = (self._activator_popup_form
+                       if (self._activator_mode and self._activator_popup_form)
+                       else self.w_form)
+        if active_form and active_form.should_trigger_lookup():
+            call = active_form.callsign_value()
             if call:
                 self.lookup_worker.trigger(call)
                 self.lookup = None
                 self.park_info = None
-                # Also look up park if filled
-                park = self.w_form.park_value()
+                park = active_form.park_value()
                 if park:
                     self._lookup_park(park)
 
@@ -2294,6 +2301,8 @@ class PotaHunterTUI:
             self.w_filter.draw(self.cfg, self._scan_enabled)
         if self.w_help:
             self.w_help.draw()
+        if self._activator_mode and self._activator_popup_form:
+            self._activator_popup_form.draw(self.lookup, self.park_info)
         curses.doupdate()
 
     # ── Key dispatch ──────────────────────────────────────────────────────────
@@ -2357,6 +2366,16 @@ class PotaHunterTUI:
                 self.spot_refresher.trigger_now(); return
             self.w_spots.handle_key(ch)
 
+        elif self.focus == FOCUS_ACTIVATOR and self._activator_popup_form:
+            result = self._activator_popup_form.handle_key(ch)
+            if result == "log":
+                self.cmd_log_qso()
+            elif result == "clear":
+                park = self.cfg.get("my_park", "")
+                self._activator_popup_form.clear()
+                self._activator_popup_form.fields[3].set_value(park)
+                self.lookup = None; self.park_info = None
+
         elif self.focus == FOCUS_FORM and self.w_form:
             result = self.w_form.handle_key(ch)
             if result == "log":
@@ -2380,7 +2399,10 @@ class PotaHunterTUI:
                 self._cmd_delete_qso()
 
     def _cycle_focus(self, forward: bool):
-        order = [FOCUS_FORM, FOCUS_SPOTS, FOCUS_LOG]
+        if self._activator_mode:
+            order = [FOCUS_ACTIVATOR, FOCUS_SPOTS, FOCUS_LOG]
+        else:
+            order = [FOCUS_FORM, FOCUS_SPOTS, FOCUS_LOG]
         idx   = order.index(self.focus) if self.focus in order else 0
         step  = 1 if forward else -1
         self.focus = order[(idx + step) % len(order)]
@@ -2392,9 +2414,12 @@ class PotaHunterTUI:
             action = ModalDialog.logbook_menu(self.stdscr, None)
             if not action or not self._handle_logbook_action(action):
                 return
-        if not self.w_form:
+        form = (self._activator_popup_form
+                if (self._activator_mode and self._activator_popup_form)
+                else self.w_form)
+        if not form:
             return
-        vals = self.w_form.get_values()
+        vals = form.get_values()
         if not vals["call"]:
             self._set_status("Callsign is required.", "warn"); return
 
@@ -2437,8 +2462,15 @@ class PotaHunterTUI:
             self.w_spots.set_spots(self.spot_state.get_filtered(), self._worked_calls())
 
         self._set_status(f"Logged {vals['call']}  {band} {mode}", "ok")
-        self.w_form.clear()
         self.lookup = None; self.park_info = None
+
+        if self._activator_mode and self._activator_popup_form:
+            park = self.cfg.get("my_park", "")
+            self._activator_popup_form.clear()
+            self._activator_popup_form.fields[3].set_value(park)
+        else:
+            if self.w_form:
+                self.w_form.clear()
 
     def cmd_tune_to_spot(self, spot: dict):
         freq_khz_str = str(spot.get("frequency", "") or "")
@@ -2533,6 +2565,9 @@ class PotaHunterTUI:
             self._set_status("Auto-scan stopped.", "info")
 
     def cmd_toggle_scan(self):
+        if self._activator_mode and not self._scan_enabled:
+            self._set_status("Cannot start scan while in activator mode.", "warn")
+            return
         self._scan_enabled = not self._scan_enabled
         if self._scan_enabled:
             self.auto_scanner.enable()
@@ -2561,12 +2596,39 @@ class PotaHunterTUI:
                     return
                 self.cfg["my_park"] = my_park.strip().upper()
                 save_config(self.cfg)
-            self.focus = FOCUS_FORM
-            self._set_status(
-                f"ACTIVATOR MODE ON — Park: {self.cfg['my_park']}", "ok")
+
+            # Pause scan if running
+            if self._scan_enabled:
+                self._stop_scan()
+                self._scan_paused_by_activator = True
+
+            # Create centered popup
+            H, W = self.stdscr.getmaxyx()
+            popup_h, popup_w = 18, 52
+            y = max(0, (H - popup_h) // 2)
+            x = max(0, (W - popup_w) // 2)
+            self._activator_popup_win  = curses.newwin(popup_h, popup_w, y, x)
+            park = self.cfg["my_park"]
+            self._activator_popup_form = QSOForm(
+                self._activator_popup_win,
+                title=f" ◈ ACTIVATOR: {park} ")
+            self._activator_popup_form.fields[3].set_value(park)
+
+            self.focus = FOCUS_ACTIVATOR
+            self._set_status(f"ACTIVATOR MODE ON — Park: {park}", "ok")
         else:
+            # Tear down popup
+            self._activator_popup_win  = None
+            self._activator_popup_form = None
+
+            # Resume scan if it was paused by activator mode
+            if self._scan_paused_by_activator:
+                self._scan_paused_by_activator = False
+                self.cmd_toggle_scan()
+
             if self.w_form:
                 self.w_form.fields[3].set_value("")
+            self.focus = FOCUS_SPOTS
             self._set_status("Activator mode OFF — Hunter mode", "info")
 
     def cmd_logbook_menu(self):
