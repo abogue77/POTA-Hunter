@@ -1610,6 +1610,7 @@ class FilterBar:
 
     def __init__(self, win):
         self.win = win
+        self._flash_frame = 0
 
     def draw(self, cfg: dict, scan_enabled: bool):
         win = self.win
@@ -1637,15 +1638,17 @@ class FilterBar:
         x = 1 + len(base)
         if x < W - 1:
             if scan_enabled:
-                phase = int(time.monotonic() * 2) % 2  # flips every 0.5 s
-                if phase:
-                    scan_str = "Scanning... "
+                self._flash_frame += 1
+                # toggle every 3 draw calls (~0.6 s at 5 fps; also visible per keypress)
+                if (self._flash_frame // 3) % 2:
+                    scan_str  = "** SCANNING **"
                     scan_attr = curses.color_pair(CP_SUCCESS) | curses.A_BOLD
                 else:
-                    scan_str = "F6:Scan[ON ]"
-                    scan_attr = curses.color_pair(CP_NORMAL)
+                    scan_str  = "F6:Scan[ ON ]"
+                    scan_attr = curses.color_pair(CP_NORMAL) | curses.A_BOLD
             else:
-                scan_str = "F6:Scan[OFF]"
+                self._flash_frame = 0
+                scan_str  = "F6:Scan[OFF]"
                 scan_attr = curses.color_pair(CP_NORMAL)
             safe_addstr(win, 0, x, trunc(scan_str, W - 1 - x), scan_attr)
 
@@ -2141,6 +2144,7 @@ class PotaHunterTUI:
             elif isinstance(ev, EvScanAdvance):
                 if self.w_spots and self.w_spots.spots:
                     self.w_spots.sel_idx = min(ev.pos, len(self.w_spots.spots) - 1)
+                    self._last_auto_pop_idx = -1  # force form refresh on this advance
             elif isinstance(ev, EvTuneRequest):
                 self._do_tune(ev.freq_hz, ev.mode)
 
@@ -2397,6 +2401,13 @@ class PotaHunterTUI:
         if self._scan_enabled:
             self.auto_scanner.enable()
             self._set_status("Auto-scan enabled.", "ok")
+            # Immediately highlight & populate the current scan position
+            # so the user sees visual feedback without waiting for the first interval
+            pos = self.auto_scanner._pos
+            try:
+                self.event_queue.put_nowait(EvScanAdvance(pos=pos))
+            except Exception:
+                pass
         else:
             self.auto_scanner.disable()
             self._set_status("Auto-scan disabled.", "info")
