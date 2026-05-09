@@ -1163,7 +1163,7 @@ class StatusBar:
         if scan_enabled:
             self._flash_frame += 1
             scan_label = " ** SCANNING ** " if (self._flash_frame // 3) % 2 else " [  SCAN ON  ] "
-            scan_col   = max(len(title) + 2, W - len(scan_label) - 1)
+            scan_col   = max(len(title) + 2, (W - len(scan_label)) // 2)
             safe_addstr(win, 0, scan_col,
                         trunc(scan_label, W - scan_col - 1),
                         curses.color_pair(CP_SUCCESS) | curses.A_BOLD)
@@ -1735,7 +1735,7 @@ class ModalDialog:
     @staticmethod
     def confirm(stdscr, title: str, question: str) -> bool:
         H, W = stdscr.getmaxyx()
-        dw = min(max(len(title), len(question)) + 8, W - 4)
+        dw = min(max(len(title), len(question), 26) + 8, W - 4)
         dh = 6
         y0 = (H - dh) // 2; x0 = (W - dw) // 2
         win = curses.newwin(dh, dw, y0, x0)
