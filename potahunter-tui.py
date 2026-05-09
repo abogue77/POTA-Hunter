@@ -970,7 +970,7 @@ def setup_colors():
     curses.init_pair(CP_BORDER,   curses.COLOR_BLUE,    bg)
     curses.init_pair(CP_ERROR,    curses.COLOR_RED,     bg)
     curses.init_pair(CP_SUCCESS,  curses.COLOR_GREEN,   bg)
-    curses.init_pair(CP_QRT,      curses.COLOR_BLACK,   bg)  # dim
+    curses.init_pair(CP_QRT,      curses.COLOR_WHITE,   bg)  # dim hints / QRT stations
     curses.init_pair(CP_HEADER,   curses.COLOR_YELLOW,  bg)
     curses.init_pair(CP_ACCENT,   curses.COLOR_MAGENTA, bg)
 
@@ -2299,6 +2299,9 @@ class PotaHunterTUI:
     # ── Key dispatch ──────────────────────────────────────────────────────────
 
     def _dispatch_global(self, ch: int) -> bool:
+        if self._scan_enabled and ch in (ord('\n'), ord('\r'), curses.KEY_F2):
+            self._stop_scan()
+            # don't consume — let the key fall through to focus handling
         if (ch == ord('q') or ch == ord('Q')) and self.focus != FOCUS_FORM:
             if ModalDialog.confirm(self.stdscr, "Quit", "Quit POTA Hunter TUI?"):
                 self._shutdown()
