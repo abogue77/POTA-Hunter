@@ -778,6 +778,10 @@ class EvStatus:
 class EvTuneRequest:
     freq_hz: float; mode: str
 
+@dataclasses.dataclass
+class EvScanAdvance:
+    pos: int
+
 # ── Section 4: Background worker threads ──────────────────────────────────────
 
 class FlrigPoller(threading.Thread):
@@ -921,6 +925,7 @@ class AutoScanner(threading.Thread):
             self._pos = (self._pos + 1) % len(spots)
             spot = spots[self._pos]
             try:
+                self._q.put_nowait(EvScanAdvance(pos=self._pos))
                 freq_khz = float(spot.get("frequency", 0) or 0)
                 if freq_khz > 0:
                     self._q.put_nowait(EvTuneRequest(
@@ -1619,17 +1624,31 @@ class FilterBar:
         mode  = cfg.get("pota_mode", "All")
         qrt   = "[x]" if cfg.get("pota_hide_qrt") else "[ ]"
         oob   = "[x]" if cfg.get("pota_hide_oob") else "[ ]"
-        scan  = "ON " if scan_enabled else "OFF"
         itu   = "".join([
             "1" if cfg.get("pota_itu_r1") else "-",
             "2" if cfg.get("pota_itu_r2") else "-",
             "3" if cfg.get("pota_itu_r3") else "-",
         ])
-        line = (f" b:Band[{band}] m:Mode[{mode}] "
-                f"x:{qrt}QRT o:{oob}OOB r:ITU[{itu}] "
-                f"F6:Scan[{scan}]")
+        base = (f" b:Band[{band}] m:Mode[{mode}] "
+                f"x:{qrt}QRT o:{oob}OOB r:ITU[{itu}] ")
         safe_addstr(win, 0, 0, B_LT, battr)
-        safe_addstr(win, 0, 1, trunc(line, W - 2), curses.color_pair(CP_NORMAL))
+        safe_addstr(win, 0, 1, trunc(base, W - 2), curses.color_pair(CP_NORMAL))
+
+        x = 1 + len(base)
+        if x < W - 1:
+            if scan_enabled:
+                phase = int(time.monotonic() * 2) % 2  # flips every 0.5 s
+                if phase:
+                    scan_str = "Scanning... "
+                    scan_attr = curses.color_pair(CP_SUCCESS) | curses.A_BOLD
+                else:
+                    scan_str = "F6:Scan[ON ]"
+                    scan_attr = curses.color_pair(CP_NORMAL)
+            else:
+                scan_str = "F6:Scan[OFF]"
+                scan_attr = curses.color_pair(CP_NORMAL)
+            safe_addstr(win, 0, x, trunc(scan_str, W - 1 - x), scan_attr)
+
         safe_addstr(win, 0, W - 1, B_RT, battr)
         win.noutrefresh()
 
@@ -1962,6 +1981,7 @@ class PotaHunterTUI:
         self.status_exp   = 0.0      # monotonic time when status expires
         self.focus          = FOCUS_SPOTS
         self._scan_enabled  = False
+        self._last_auto_pop_idx: int = -1
         self._activator_mode= False
 
         # Workers (started in run())
@@ -2069,6 +2089,7 @@ class PotaHunterTUI:
 
             self._process_events()
             self._check_idle_lookup()
+            self._auto_populate_from_selection()
             self._redraw()
 
             ch = self.stdscr.getch()
@@ -2104,6 +2125,7 @@ class PotaHunterTUI:
                 worked = self._worked_calls()
                 if self.w_spots:
                     self.w_spots.set_spots(ev.filtered, worked)
+                self._last_auto_pop_idx = -1
             elif isinstance(ev, EvLookupResult):
                 self.lookup = ev.result
                 # Also trigger park lookup if park field is filled
@@ -2116,6 +2138,9 @@ class PotaHunterTUI:
             elif isinstance(ev, EvStatus):
                 self.status_msg = ev.msg
                 self.status_exp = time.monotonic() + 5.0
+            elif isinstance(ev, EvScanAdvance):
+                if self.w_spots and self.w_spots.spots:
+                    self.w_spots.sel_idx = min(ev.pos, len(self.w_spots.spots) - 1)
             elif isinstance(ev, EvTuneRequest):
                 self._do_tune(ev.freq_hz, ev.mode)
 
@@ -2130,6 +2155,26 @@ class PotaHunterTUI:
                 park = self.w_form.park_value()
                 if park:
                     self._lookup_park(park)
+
+    def _auto_populate_from_selection(self):
+        if self._activator_mode:
+            return
+        if not self.w_spots or not self.w_spots.spots or not self.w_form:
+            return
+        idx = self.w_spots.sel_idx
+        if idx == self._last_auto_pop_idx:
+            return
+        self._last_auto_pop_idx = idx
+        spot = self.w_spots.spots[idx]
+        self.w_form.populate_from_spot(spot)
+        call = spot.get("activator", "")
+        if call:
+            self.lookup_worker.trigger(call)
+            self.lookup = None
+            self.park_info = None
+        ref = spot.get("reference", "")
+        if ref:
+            self._lookup_park(ref)
 
     def _lookup_park(self, ref: str):
         def _run():
