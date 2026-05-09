@@ -2303,6 +2303,11 @@ class PotaHunterTUI:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _redraw(self):
+        # Seed the virtual screen with blanks so cells no longer covered by
+        # any panel window (e.g. after a layout change) are cleared by doupdate.
+        self.stdscr.erase()
+        self.stdscr.noutrefresh()
+
         fs = self.flrig_state.snapshot()
         spots = self.spot_state.get_filtered()
 
@@ -2608,8 +2613,12 @@ class PotaHunterTUI:
                 self._stop_scan()
                 self._scan_paused_by_activator = True
 
-            # Rebuild layout: form window moves to center of screen
-            self.stdscr.clear()
+            # Rebuild layout: form window moves to center of screen.
+            # erase+noutrefresh+doupdate clears the physical screen so
+            # nothing from the old layout lingers after doupdate in _redraw.
+            self.stdscr.erase()
+            self.stdscr.noutrefresh()
+            curses.doupdate()
             self.layout()
             self.focus = FOCUS_FORM
             self._set_status(
@@ -2621,7 +2630,9 @@ class PotaHunterTUI:
                 self.cmd_toggle_scan()
 
             # Rebuild layout: restore normal window arrangement
-            self.stdscr.clear()
+            self.stdscr.erase()
+            self.stdscr.noutrefresh()
+            curses.doupdate()
             self.layout()
             self.focus = FOCUS_SPOTS
             self._set_status("Activator mode OFF — Hunter mode", "info")
