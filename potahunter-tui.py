@@ -1136,11 +1136,12 @@ class TextField:
 class StatusBar:
     def __init__(self, win):
         self.win = win
+        self._flash_frame = 0
 
     def draw(self, flrig: FlrigState, cfg: dict,
              logbook_path: Optional[pathlib.Path],
              spot_count: int, status_msg: StatusMessage,
-             activator_mode: bool = False):
+             activator_mode: bool = False, scan_enabled: bool = False):
         win = self.win
         H, W = win.getmaxyx()
         win.erase()
@@ -1158,6 +1159,16 @@ class StatusBar:
             safe_addstr(win, 0, act_col,
                         trunc(act_label, W - act_col - 1),
                         curses.color_pair(CP_TX) | curses.A_BOLD)
+
+        if scan_enabled:
+            self._flash_frame += 1
+            scan_label = " ** SCANNING ** " if (self._flash_frame // 3) % 2 else " [  SCAN ON  ] "
+            scan_col   = max(len(title) + 2, W - len(scan_label) - 1)
+            safe_addstr(win, 0, scan_col,
+                        trunc(scan_label, W - scan_col - 1),
+                        curses.color_pair(CP_SUCCESS) | curses.A_BOLD)
+        else:
+            self._flash_frame = 0
 
         # Row 1: VFO / telemetry
         if H >= 2:
@@ -1531,7 +1542,7 @@ class QSOLogPanel:
         park_w  = max(8, inner - fixed - len(self.COLS))
         return [3, 9, 8, 4, 9, 4, 5, 3, 3, park_w]
 
-    def draw(self):
+    def draw(self, focused: bool = False):
         win  = self.win
         H, W = win.getmaxyx()
         win.erase()
@@ -1549,6 +1560,11 @@ class QSOLogPanel:
 
         title = f" Recent QSOs ({len(self.qsos)}) "
         safe_addstr(win, 0, 2, title, curses.color_pair(CP_TITLE) | curses.A_BOLD)
+        if focused and W > 30:
+            hints = " e:Edit  d:Del "
+            safe_addstr(win, 0, W - len(hints) - 1,
+                        trunc(hints, W - len(title) - 3),
+                        curses.color_pair(CP_QRT))
 
         widths = self._col_widths(W)
         hattr  = curses.color_pair(CP_HEADER) | curses.A_BOLD
@@ -1590,7 +1606,13 @@ class QSOLogPanel:
 
         win.noutrefresh()
 
-    def handle_key(self, ch: int) -> bool:
+    def selected_qso(self) -> Optional[dict]:
+        if not self.qsos or self.sel_idx >= len(self.qsos):
+            return None
+        return dict(self.qsos[self.sel_idx])
+
+    def handle_key(self, ch: int):
+        """Returns 'edit', 'delete', True (navigation consumed), or False."""
         n = len(self.qsos)
         if ch == curses.KEY_UP:
             self.sel_idx = max(0, self.sel_idx - 1); return True
@@ -1600,6 +1622,10 @@ class QSOLogPanel:
             self.sel_idx = max(0, self.sel_idx - 5); return True
         if ch == curses.KEY_NPAGE:
             self.sel_idx = min(max(0, n - 1), self.sel_idx + 5); return True
+        if ch == ord('e') or ch == ord('E'):
+            return "edit"
+        if ch in (ord('d'), ord('D'), curses.KEY_DC):
+            return "delete"
         return False
 
 
@@ -1637,19 +1663,8 @@ class FilterBar:
 
         x = 1 + len(base)
         if x < W - 1:
-            if scan_enabled:
-                self._flash_frame += 1
-                # toggle every 3 draw calls (~0.6 s at 5 fps; also visible per keypress)
-                if (self._flash_frame // 3) % 2:
-                    scan_str  = "** SCANNING **"
-                    scan_attr = curses.color_pair(CP_SUCCESS) | curses.A_BOLD
-                else:
-                    scan_str  = "F6:Scan[ ON ]"
-                    scan_attr = curses.color_pair(CP_NORMAL) | curses.A_BOLD
-            else:
-                self._flash_frame = 0
-                scan_str  = "F6:Scan[OFF]"
-                scan_attr = curses.color_pair(CP_NORMAL)
+            scan_str  = "F6:Scan[ON ]" if scan_enabled else "F6:Scan[OFF]"
+            scan_attr = curses.color_pair(CP_NORMAL)
             safe_addstr(win, 0, x, trunc(scan_str, W - 1 - x), scan_attr)
 
         safe_addstr(win, 0, W - 1, B_RT, battr)
@@ -1808,6 +1823,64 @@ class ModalDialog:
                 for key, _, tf in fields:
                     new_cfg[key] = tf.value()
                 return new_cfg
+            if ch == ord('\t'):
+                focus = (focus + 1) % len(fields)
+            elif ch == curses.KEY_BTAB:
+                focus = (focus - 1) % len(fields)
+            else:
+                fields[focus][2].handle_key(ch)
+
+    @staticmethod
+    def qso_editor(stdscr, row: dict) -> Optional[dict]:
+        """Edit a QSO row. Returns updated dict or None if cancelled."""
+        FIELDS = [
+            ("call",     "Callsign",   True),
+            ("date",     "Date",       False),
+            ("time_on",  "Time (UTC)", False),
+            ("freq",     "Freq (MHz)", False),
+            ("band",     "Band",       True),
+            ("mode",     "Mode",       True),
+            ("rst_sent", "RST Sent",   False),
+            ("rst_rcvd", "RST Rcvd",   False),
+            ("park_nr",  "Park #",     True),
+            ("comment",  "Comment",    False),
+            ("notes",    "Notes",      False),
+        ]
+        H, W = stdscr.getmaxyx()
+        dh = min(len(FIELDS) + 6, H - 2)
+        dw = min(72, W - 4)
+        y0 = (H - dh) // 2; x0 = (W - dw) // 2
+        win = curses.newwin(dh, dw, y0, x0)
+        fields = []
+        for key, label, up in FIELDS:
+            tf = TextField(maxlen=50, uppercase=up)
+            tf.set_value(str(row.get(key, "") or ""))
+            fields.append((key, label, tf))
+        focus = 0
+        offset = 0
+        visible = dh - 4
+        while True:
+            win.erase()
+            draw_border(win, "Edit QSO  (Enter/s=Save  Esc=Cancel  Tab=Next)")
+            safe_addstr(win, dh - 2, 2, "Enter/s:Save  Esc:Cancel  Tab:Next  Shift-Tab:Prev",
+                        curses.color_pair(CP_QRT))
+            if focus < offset: offset = focus
+            if focus >= offset + visible: offset = focus - visible + 1
+            for i, (key, label, tf) in enumerate(fields[offset:offset + visible]):
+                r = i + 1
+                idx = offset + i
+                la = curses.color_pair(CP_LABEL) | (curses.A_BOLD if idx == focus else 0)
+                safe_addstr(win, r, 2, f"{label}:", la)
+                tf.draw(win, r, 18, dw - 20, focused=(idx == focus))
+            win.refresh()
+            ch = win.getch()
+            if ch == 27:
+                return None
+            if ch in (ord('\n'), ord('\r'), ord('s')):
+                result = dict(row)
+                for key, _, tf in fields:
+                    result[key] = tf.value().strip()
+                return result
             if ch == ord('\t'):
                 focus = (focus + 1) % len(fields)
             elif ch == curses.KEY_BTAB:
@@ -2209,13 +2282,14 @@ class PotaHunterTUI:
         if self.w_status:
             self.w_status.draw(fs, self.cfg, self.logbook_path,
                                len(spots), self.status_msg,
-                               activator_mode=self._activator_mode)
+                               activator_mode=self._activator_mode,
+                               scan_enabled=self._scan_enabled)
         if self.w_spots:
             self.w_spots.draw(self.cfg)
         if self.w_form:
             self.w_form.draw(self.lookup, self.park_info)
         if self.w_log:
-            self.w_log.draw()
+            self.w_log.draw(focused=(self.focus == FOCUS_LOG))
         if self.w_filter:
             self.w_filter.draw(self.cfg, self._scan_enabled)
         if self.w_help:
@@ -2294,7 +2368,11 @@ class PotaHunterTUI:
                 if spot: self.cmd_respot(spot)
 
         elif self.focus == FOCUS_LOG and self.w_log:
-            self.w_log.handle_key(ch)
+            result = self.w_log.handle_key(ch)
+            if result == "edit":
+                self._cmd_edit_qso()
+            elif result == "delete":
+                self._cmd_delete_qso()
 
     def _cycle_focus(self, forward: bool):
         order = [FOCUS_FORM, FOCUS_SPOTS, FOCUS_LOG]
@@ -2391,6 +2469,53 @@ class PotaHunterTUI:
             self._set_status(f"Respot sent for {activator}", "ok")
         else:
             self._set_status(f"Respot failed: {err}", "error")
+
+    def _refresh_log_panel(self):
+        qsos = self.qso_index.execute(
+            "SELECT * FROM qso ORDER BY date DESC, time_on DESC LIMIT 200").fetchall()
+        if self.w_log:
+            self.w_log.set_qsos(qsos)
+        if self.w_spots:
+            self.w_spots.set_spots(self.spot_state.get_filtered(), self._worked_calls())
+
+    def _cmd_edit_qso(self):
+        if not self.logbook_path or not self.w_log:
+            return
+        row = self.w_log.selected_qso()
+        if not row:
+            return
+        updated = ModalDialog.qso_editor(self.stdscr, row)
+        if updated is None:
+            return
+        self.qso_index.execute("""
+            UPDATE qso SET call=:call, date=:date, time_on=:time_on,
+                freq=:freq, band=:band, mode=:mode,
+                rst_sent=:rst_sent, rst_rcvd=:rst_rcvd,
+                park_nr=:park_nr, comment=:comment, notes=:notes
+            WHERE id=:id
+        """, updated)
+        self.qso_index.commit()
+        rewrite_adif(self.logbook_path, self.qso_index, self.cfg.get("callsign", ""))
+        self._refresh_log_panel()
+        self._set_status(f"QSO updated: {updated.get('call','')}", "ok")
+
+    def _cmd_delete_qso(self):
+        if not self.logbook_path or not self.w_log:
+            return
+        row = self.w_log.selected_qso()
+        if not row:
+            return
+        call = row.get("call", "?")
+        if not ModalDialog.confirm(self.stdscr, "Delete QSO",
+                                   f"Delete QSO with {call}?"):
+            return
+        self.qso_index.execute("DELETE FROM qso WHERE id=:id", {"id": row["id"]})
+        self.qso_index.commit()
+        rewrite_adif(self.logbook_path, self.qso_index, self.cfg.get("callsign", ""))
+        if self.w_log:
+            self.w_log.sel_idx = max(0, self.w_log.sel_idx - 1)
+        self._refresh_log_panel()
+        self._set_status(f"QSO deleted: {call}", "ok")
 
     def cmd_refresh_spots(self):
         self._set_status("Refreshing spots…", "info")
