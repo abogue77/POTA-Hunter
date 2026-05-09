@@ -2313,8 +2313,9 @@ class PotaHunterTUI:
             self.w_spots.draw(self.cfg)
         if self.w_form:
             if self._activator_mode:
-                # Blank the right-side panel so the centered popup stands out
+                # Blank the right-side panel; touchwin forces every cell dirty
                 self._form_win.erase()
+                self._form_win.touchwin()
                 self._form_win.noutrefresh()
             else:
                 self.w_form.draw(self.lookup, self.park_info)
@@ -2324,9 +2325,12 @@ class PotaHunterTUI:
             self.w_filter.draw(self.cfg, self._scan_enabled)
         if self.w_help:
             self.w_help.draw()
+        curses.doupdate()
+        # Draw activator popup AFTER doupdate using direct refresh so it
+        # is guaranteed to paint on top of whatever the panels just rendered.
         if self._activator_mode and self._activator_popup_form:
             self._activator_popup_form.draw(self.lookup, self.park_info)
-        curses.doupdate()
+            self._activator_popup_win.refresh()
 
     # ── Key dispatch ──────────────────────────────────────────────────────────
 
