@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     "pota_itu_r3":           True,
     "pota_scan_skip_worked": False,
     "pota_scan_interval":    30,
+    "auto_spot":             False,
     "fcc_db_date":           "",
     "license_class":         "Extra",
     "my_park":               "",
@@ -392,6 +393,9 @@ def filter_spots(spots: list, cfg: dict) -> list:
         if hide_oob and freq_mhz and not _in_band(freq_mhz, lic, mode):
             continue
         if hide_qrt:
+            comment_up = str(s.get("comments", "") or "").upper()
+            if "QRT" in comment_up:
+                continue
             spot_time_str = s.get("spotTime", "") or ""
             try:
                 st = datetime.datetime.fromisoformat(
@@ -1221,7 +1225,7 @@ class StatusBar:
 class SpotListPanel:
     COLS = [
         ("Activator", 10), ("Park", 8), ("Freq", 9),
-        ("Mode", 5), ("Park Name", 14), ("Comment", 12), ("Age", 4),
+        ("Mode", 5), ("Park Name", 14), ("State", 6), ("Comment", 12), ("Age", 4),
     ]
 
     def __init__(self, win):
@@ -1229,7 +1233,7 @@ class SpotListPanel:
         self.spots:     List[dict] = []
         self.sel_idx    = 0
         self.offset     = 0
-        self._worked:   set = set()
+        self._worked:     set = set()
         self._park_names: Dict[str, str] = {}
 
     def _fetch_park_names(self, spots: list) -> Dict[str, str]:
@@ -1244,7 +1248,7 @@ class SpotListPanel:
                 rows = cx.execute(
                     f"SELECT reference, name FROM parks WHERE reference IN ({placeholders})",
                     refs).fetchall()
-            return {r[0]: r[1] for r in rows}
+            return {r[0]: r[1] or "" for r in rows}
         except Exception:
             return {}
 
@@ -1261,12 +1265,12 @@ class SpotListPanel:
 
     def _col_widths(self, W: int) -> List[int]:
         inner = W - 2
-        # activator(10)+park(8)+freq(9)+mode(5)+age(4) + 6 separators + 2 prefix
-        fixed = 10 + 8 + 9 + 5 + 4 + 6 + 2
+        # activator(10)+park(8)+freq(9)+mode(5)+state(6)+age(4) + 7 separators + 2 prefix
+        fixed = 10 + 8 + 9 + 5 + 6 + 4 + 7 + 2
         remaining = max(14, inner - fixed)
         name_w    = max(8,  remaining // 3)
         comment_w = max(6,  remaining - name_w)
-        return [10, 8, 9, 5, name_w, comment_w, 4]
+        return [10, 8, 9, 5, name_w, 6, comment_w, 4]
 
     def draw(self, cfg: dict):
         win  = self.win
@@ -1341,8 +1345,9 @@ class SpotListPanel:
             prefix = ARROW + " " if is_sel else "  "
             safe_addstr(win, row, 1, prefix, attr)
             col = 3
-            park_name = self._park_names.get(park, "")
-            vals = [call, park, freq_str, mode, park_name, comment, age]
+            park_name  = self._park_names.get(park, "")
+            location   = str(spot.get("locationDesc", "") or "")
+            vals = [call, park, freq_str, mode, park_name, location, comment, age]
             for v, w in zip(vals, widths):
                 safe_addstr(win, row, col, trunc(v, w).ljust(w), attr)
                 col += w + 1
@@ -1657,8 +1662,9 @@ class FilterBar:
             "2" if cfg.get("pota_itu_r2") else "-",
             "3" if cfg.get("pota_itu_r3") else "-",
         ])
+        aspot = "[x]" if cfg.get("auto_spot") else "[ ]"
         base = (f" b:Band[{band}] m:Mode[{mode}] "
-                f"x:{qrt}QRT o:{oob}OOB r:ITU[{itu}] ")
+                f"x:{qrt}QRT o:{oob}OOB r:ITU[{itu}] s:{aspot}AutoSpot ")
         safe_addstr(win, 0, 0, B_LT, battr)
         safe_addstr(win, 0, 1, trunc(base, W - 2), curses.color_pair(CP_NORMAL))
 
@@ -1698,6 +1704,8 @@ class FilterBar:
             else:
                 cfg["pota_itu_r1"]=True;  cfg["pota_itu_r2"]=True;  cfg["pota_itu_r3"]=True
             return True
+        if ch == ord('s'):
+            cfg["auto_spot"] = not cfg.get("auto_spot", False); return True
         return False
 
 
@@ -2061,6 +2069,7 @@ class PotaHunterTUI:
         self._last_auto_pop_idx: int = -1
         self._activator_mode           = False
         self._scan_paused_by_activator = False
+        self._rfill_win                = None  # blank fill for uncovered area in activator layout
 
         # Workers (started in run())
         self.flrig_poller   = FlrigPoller(self.event_queue, cfg)
@@ -2107,7 +2116,7 @@ class PotaHunterTUI:
         if self._activator_mode:
             # Activator layout: form is a centered popup-style box with spots
             # narrowed to the left — no overlapping windows.
-            FORM_H = min(18, MIDDLE_H)
+            FORM_H = min(18, MIDDLE_H - 2)    # reserve ≥2 rows for log
             FORM_W = min(52, W - 4)
             form_x = max(0, (W - FORM_W) // 2)
             form_y = STATUS_H
@@ -2118,19 +2127,21 @@ class PotaHunterTUI:
             row1    = STATUS_H
             row2    = STATUS_H + FORM_H
 
+            right_x = form_x + FORM_W
+            right_w = W - right_x
+
             self._spots_win = curses.newwin(SPOTS_H, SPOTS_W, row1, 0)
             self._form_win  = curses.newwin(FORM_H,  FORM_W,  form_y, form_x)
-            if LOG_H > 1:
-                self._log_win = curses.newwin(LOG_H, W, row2, 0)
-            else:
-                self._log_win = None
+            self._log_win   = curses.newwin(LOG_H,   W,       row2, 0)
+            # Cover the area to the right of the centered form so the old
+            # normal-mode form content there gets overwritten on the next doupdate.
+            self._rfill_win = curses.newwin(FORM_H, right_w, form_y, right_x) if right_w > 0 else None
 
             self.w_spots = SpotListPanel(self._spots_win)
             park = self.cfg.get("my_park", "")
             self.w_form  = QSOForm(self._form_win,
                                    title=f" ◈ ACTIVATOR: {park} ")
-            self.w_form.fields[3].set_value(park)
-            self.w_log   = QSOLogPanel(self._log_win) if self._log_win else None
+            self.w_log   = QSOLogPanel(self._log_win)
         else:
             # Normal layout: spots left, form right
             if W >= 110:
@@ -2148,6 +2159,7 @@ class PotaHunterTUI:
             self._spots_win = curses.newwin(SPOTS_H,  SPOTS_W, row1, 0)
             self._form_win  = curses.newwin(MIDDLE_H, FORM_W,  row1, SPOTS_W)
             self._log_win   = curses.newwin(LOG_H,    W,       row2, 0)
+            self._rfill_win = None
 
             self.w_spots = SpotListPanel(self._spots_win)
             self.w_form  = QSOForm(self._form_win)
@@ -2303,11 +2315,6 @@ class PotaHunterTUI:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _redraw(self):
-        # Seed the virtual screen with blanks so cells no longer covered by
-        # any panel window (e.g. after a layout change) are cleared by doupdate.
-        self.stdscr.erase()
-        self.stdscr.noutrefresh()
-
         fs = self.flrig_state.snapshot()
         spots = self.spot_state.get_filtered()
 
@@ -2323,6 +2330,9 @@ class PotaHunterTUI:
             self.w_spots.draw(self.cfg)
         if self.w_form:
             self.w_form.draw(self.lookup, self.park_info)
+        if self._rfill_win:
+            self._rfill_win.erase()
+            self._rfill_win.noutrefresh()
         if self.w_log:
             self.w_log.draw(focused=(self.focus == FOCUS_LOG))
         if self.w_filter:
@@ -2399,9 +2409,6 @@ class PotaHunterTUI:
             elif result == "clear":
                 self.w_form.clear()
                 self.lookup = None; self.park_info = None
-                if self._activator_mode:
-                    park = self.cfg.get("my_park", "")
-                    self.w_form.fields[3].set_value(park)
             elif result == "next-panel":
                 self.focus = FOCUS_SPOTS
             if ch == curses.KEY_F3:
@@ -2479,9 +2486,27 @@ class PotaHunterTUI:
         self.lookup = None; self.park_info = None
         if self.w_form:
             self.w_form.clear()
+
+        if self.cfg.get("auto_spot") and freq:
+            freq_khz = f"{freq * 1000:.1f}"
             if self._activator_mode:
-                park = self.cfg.get("my_park", "")
-                self.w_form.fields[3].set_value(park)
+                activator = self.cfg.get("callsign", "")
+                park_ref  = self.cfg.get("my_park", "")
+            else:
+                activator = vals["call"].upper()
+                park_ref  = vals["park_nr"]
+            spotter = self.cfg.get("callsign", "")
+            if activator and park_ref:
+                def _post(act=activator, spt=spotter, ref=park_ref,
+                          fk=freq_khz, md=mode):
+                    ok, err = pota_post_spot(act, spt, ref, fk, md)
+                    if not ok:
+                        try:
+                            self.event_queue.put_nowait(
+                                EvStatus(StatusMessage(f"Auto-spot failed: {err}", "error")))
+                        except Exception:
+                            pass
+                threading.Thread(target=_post, daemon=True).start()
 
     def cmd_tune_to_spot(self, spot: dict):
         freq_khz_str = str(spot.get("frequency", "") or "")
@@ -2613,29 +2638,23 @@ class PotaHunterTUI:
                 self._stop_scan()
                 self._scan_paused_by_activator = True
 
-            # Rebuild layout: form window moves to center of screen.
-            # erase+noutrefresh+doupdate clears the physical screen so
-            # nothing from the old layout lingers after doupdate in _redraw.
-            self.stdscr.erase()
-            self.stdscr.noutrefresh()
-            curses.doupdate()
+            self.lookup    = None
+            self.park_info = None
             self.layout()
             self.focus = FOCUS_FORM
             self._set_status(
                 f"ACTIVATOR MODE ON — Park: {self.cfg['my_park']}", "ok")
+            self._redraw()
         else:
             # Resume scan if it was paused by activator mode
             if self._scan_paused_by_activator:
                 self._scan_paused_by_activator = False
                 self.cmd_toggle_scan()
 
-            # Rebuild layout: restore normal window arrangement
-            self.stdscr.erase()
-            self.stdscr.noutrefresh()
-            curses.doupdate()
             self.layout()
             self.focus = FOCUS_SPOTS
             self._set_status("Activator mode OFF — Hunter mode", "info")
+            self._redraw()
 
     def cmd_logbook_menu(self):
         action = ModalDialog.logbook_menu(self.stdscr, self.logbook_path)
