@@ -2037,11 +2037,10 @@ class ModalDialog:
 
 # ── Section 7: App controller ─────────────────────────────────────────────────
 
-FOCUS_SPOTS     = "spots"
-FOCUS_FORM      = "form"
-FOCUS_LOG       = "log"
-FOCUS_FILTER    = "filter"
-FOCUS_ACTIVATOR = "activator_popup"
+FOCUS_SPOTS  = "spots"
+FOCUS_FORM   = "form"
+FOCUS_LOG    = "log"
+FOCUS_FILTER = "filter"
 
 class PotaHunterTUI:
 
@@ -2062,8 +2061,6 @@ class PotaHunterTUI:
         self._last_auto_pop_idx: int = -1
         self._activator_mode           = False
         self._scan_paused_by_activator = False
-        self._activator_popup_win      = None
-        self._activator_popup_form     = None
 
         # Workers (started in run())
         self.flrig_poller   = FlrigPoller(self.event_queue, cfg)
@@ -2094,69 +2091,80 @@ class PotaHunterTUI:
         if H < 24 or W < 80:
             return  # guard handled in run()
 
-        # Row allocation
         STATUS_H = 2
         FILTER_H = 1
         HELP_H   = 1
         MIDDLE_H = H - STATUS_H - FILTER_H - HELP_H
 
-        # Column split
-        if W >= 110:
-            FORM_W = 34
-        elif W >= 95:
-            FORM_W = 32
-        else:
-            FORM_W = 30
-        SPOTS_W = W - FORM_W
-
-        SPOTS_H = MIDDLE_H * 2 // 3
-        LOG_H   = MIDDLE_H - SPOTS_H
-
         row0 = 0
-        row1 = STATUS_H
-        row2 = row1 + SPOTS_H
-        row3 = row2 + LOG_H
+        row3 = H - FILTER_H - HELP_H
         row4 = row3 + FILTER_H
 
         self._status_win = curses.newwin(STATUS_H, W, row0, 0)
-        self._spots_win  = curses.newwin(SPOTS_H,  SPOTS_W, row1, 0)
-        self._form_win   = curses.newwin(MIDDLE_H, FORM_W, row1, SPOTS_W)
-        self._log_win    = curses.newwin(LOG_H,    W, row2, 0)
         self._filter_win = curses.newwin(FILTER_H + 1, W, row3, 0)
         self._help_win   = curses.newwin(HELP_H,   W, row4, 0)
 
-        self.w_status  = StatusBar(self._status_win)
-        self.w_spots   = SpotListPanel(self._spots_win)
-        self.w_form    = QSOForm(self._form_win)
-        self.w_log     = QSOLogPanel(self._log_win)
-        self.w_filter  = FilterBar(self._filter_win)
-        self.w_help    = HelpBar(self._help_win)
+        if self._activator_mode:
+            # Activator layout: form is a centered popup-style box with spots
+            # narrowed to the left — no overlapping windows.
+            FORM_H = min(18, MIDDLE_H)
+            FORM_W = min(52, W - 4)
+            form_x = max(0, (W - FORM_W) // 2)
+            form_y = STATUS_H
 
-        # Restore spots / qsos into new widgets
-        spots    = self.spot_state.get_filtered()
-        worked   = self._worked_calls()
-        self.w_spots.set_spots(spots, worked)
-        qsos = self.qso_index.execute(
-            "SELECT * FROM qso ORDER BY date DESC, time_on DESC LIMIT 200").fetchall()
-        self.w_log.set_qsos(qsos)
+            SPOTS_W = max(4, form_x)          # spots fill the left of form
+            SPOTS_H = MIDDLE_H
+            LOG_H   = MIDDLE_H - FORM_H
+            row1    = STATUS_H
+            row2    = STATUS_H + FORM_H
 
-        # Re-center activator popup if active
-        if self._activator_mode and self._activator_popup_form:
-            popup_h, popup_w = 18, 52
-            y = max(0, (H - popup_h) // 2)
-            x = max(0, (W - popup_w) // 2)
-            self._activator_popup_win = curses.newwin(popup_h, popup_w, y, x)
-            saved_vals = self._activator_popup_form.get_values()
+            self._spots_win = curses.newwin(SPOTS_H, SPOTS_W, row1, 0)
+            self._form_win  = curses.newwin(FORM_H,  FORM_W,  form_y, form_x)
+            if LOG_H > 1:
+                self._log_win = curses.newwin(LOG_H, W, row2, 0)
+            else:
+                self._log_win = None
+
+            self.w_spots = SpotListPanel(self._spots_win)
             park = self.cfg.get("my_park", "")
-            self._activator_popup_form = QSOForm(
-                self._activator_popup_win,
-                title=f" ◈ ACTIVATOR: {park} ")
-            self._activator_popup_form.fields[0].set_value(saved_vals["call"])
-            self._activator_popup_form.fields[1].set_value(saved_vals["rst_sent"])
-            self._activator_popup_form.fields[2].set_value(saved_vals["rst_rcvd"])
-            self._activator_popup_form.fields[3].set_value(saved_vals["park_nr"] or park)
-            self._activator_popup_form.fields[4].set_value(saved_vals["comment"])
-            self._activator_popup_form.fields[5].set_value(saved_vals["notes"])
+            self.w_form  = QSOForm(self._form_win,
+                                   title=f" ◈ ACTIVATOR: {park} ")
+            self.w_form.fields[3].set_value(park)
+            self.w_log   = QSOLogPanel(self._log_win) if self._log_win else None
+        else:
+            # Normal layout: spots left, form right
+            if W >= 110:
+                FORM_W = 34
+            elif W >= 95:
+                FORM_W = 32
+            else:
+                FORM_W = 30
+            SPOTS_W = W - FORM_W
+            SPOTS_H = MIDDLE_H * 2 // 3
+            LOG_H   = MIDDLE_H - SPOTS_H
+            row1 = STATUS_H
+            row2 = row1 + SPOTS_H
+
+            self._spots_win = curses.newwin(SPOTS_H,  SPOTS_W, row1, 0)
+            self._form_win  = curses.newwin(MIDDLE_H, FORM_W,  row1, SPOTS_W)
+            self._log_win   = curses.newwin(LOG_H,    W,       row2, 0)
+
+            self.w_spots = SpotListPanel(self._spots_win)
+            self.w_form  = QSOForm(self._form_win)
+            self.w_log   = QSOLogPanel(self._log_win)
+
+        self.w_status = StatusBar(self._status_win)
+        self.w_filter = FilterBar(self._filter_win)
+        self.w_help   = HelpBar(self._help_win)
+
+        # Restore live data into new widgets
+        spots  = self.spot_state.get_filtered()
+        worked = self._worked_calls()
+        self.w_spots.set_spots(spots, worked)
+        if self.w_log:
+            qsos = self.qso_index.execute(
+                "SELECT * FROM qso ORDER BY date DESC, time_on DESC LIMIT 200").fetchall()
+            self.w_log.set_qsos(qsos)
 
     def _worked_calls(self) -> set:
         rows = self.qso_index.execute("SELECT DISTINCT call FROM qso").fetchall()
@@ -2245,16 +2253,13 @@ class PotaHunterTUI:
                 self._do_tune(ev.freq_hz, ev.mode)
 
     def _check_idle_lookup(self):
-        active_form = (self._activator_popup_form
-                       if (self._activator_mode and self._activator_popup_form)
-                       else self.w_form)
-        if active_form and active_form.should_trigger_lookup():
-            call = active_form.callsign_value()
+        if self.w_form and self.w_form.should_trigger_lookup():
+            call = self.w_form.callsign_value()
             if call:
                 self.lookup_worker.trigger(call)
                 self.lookup = None
                 self.park_info = None
-                park = active_form.park_value()
+                park = self.w_form.park_value()
                 if park:
                     self._lookup_park(park)
 
@@ -2312,13 +2317,7 @@ class PotaHunterTUI:
         if self.w_spots:
             self.w_spots.draw(self.cfg)
         if self.w_form:
-            if self._activator_mode:
-                # Blank the right-side panel; touchwin forces every cell dirty
-                self._form_win.erase()
-                self._form_win.touchwin()
-                self._form_win.noutrefresh()
-            else:
-                self.w_form.draw(self.lookup, self.park_info)
+            self.w_form.draw(self.lookup, self.park_info)
         if self.w_log:
             self.w_log.draw(focused=(self.focus == FOCUS_LOG))
         if self.w_filter:
@@ -2326,11 +2325,6 @@ class PotaHunterTUI:
         if self.w_help:
             self.w_help.draw()
         curses.doupdate()
-        # Draw activator popup AFTER doupdate using direct refresh so it
-        # is guaranteed to paint on top of whatever the panels just rendered.
-        if self._activator_mode and self._activator_popup_form:
-            self._activator_popup_form.draw(self.lookup, self.park_info)
-            self._activator_popup_win.refresh()
 
     # ── Key dispatch ──────────────────────────────────────────────────────────
 
@@ -2393,22 +2387,16 @@ class PotaHunterTUI:
                 self.spot_refresher.trigger_now(); return
             self.w_spots.handle_key(ch)
 
-        elif self.focus == FOCUS_ACTIVATOR and self._activator_popup_form:
-            result = self._activator_popup_form.handle_key(ch)
-            if result == "log":
-                self.cmd_log_qso()
-            elif result == "clear":
-                park = self.cfg.get("my_park", "")
-                self._activator_popup_form.clear()
-                self._activator_popup_form.fields[3].set_value(park)
-                self.lookup = None; self.park_info = None
-
         elif self.focus == FOCUS_FORM and self.w_form:
             result = self.w_form.handle_key(ch)
             if result == "log":
                 self.cmd_log_qso()
             elif result == "clear":
-                self.w_form.clear(); self.lookup = None; self.park_info = None
+                self.w_form.clear()
+                self.lookup = None; self.park_info = None
+                if self._activator_mode:
+                    park = self.cfg.get("my_park", "")
+                    self.w_form.fields[3].set_value(park)
             elif result == "next-panel":
                 self.focus = FOCUS_SPOTS
             if ch == curses.KEY_F3:
@@ -2426,10 +2414,7 @@ class PotaHunterTUI:
                 self._cmd_delete_qso()
 
     def _cycle_focus(self, forward: bool):
-        if self._activator_mode:
-            order = [FOCUS_ACTIVATOR, FOCUS_SPOTS, FOCUS_LOG]
-        else:
-            order = [FOCUS_FORM, FOCUS_SPOTS, FOCUS_LOG]
+        order = [FOCUS_FORM, FOCUS_SPOTS, FOCUS_LOG]
         idx   = order.index(self.focus) if self.focus in order else 0
         step  = 1 if forward else -1
         self.focus = order[(idx + step) % len(order)]
@@ -2441,12 +2426,9 @@ class PotaHunterTUI:
             action = ModalDialog.logbook_menu(self.stdscr, None)
             if not action or not self._handle_logbook_action(action):
                 return
-        form = (self._activator_popup_form
-                if (self._activator_mode and self._activator_popup_form)
-                else self.w_form)
-        if not form:
+        if not self.w_form:
             return
-        vals = form.get_values()
+        vals = self.w_form.get_values()
         if not vals["call"]:
             self._set_status("Callsign is required.", "warn"); return
 
@@ -2490,14 +2472,11 @@ class PotaHunterTUI:
 
         self._set_status(f"Logged {vals['call']}  {band} {mode}", "ok")
         self.lookup = None; self.park_info = None
-
-        if self._activator_mode and self._activator_popup_form:
-            park = self.cfg.get("my_park", "")
-            self._activator_popup_form.clear()
-            self._activator_popup_form.fields[3].set_value(park)
-        else:
-            if self.w_form:
-                self.w_form.clear()
+        if self.w_form:
+            self.w_form.clear()
+            if self._activator_mode:
+                park = self.cfg.get("my_park", "")
+                self.w_form.fields[3].set_value(park)
 
     def cmd_tune_to_spot(self, spot: dict):
         freq_khz_str = str(spot.get("frequency", "") or "")
@@ -2629,32 +2608,21 @@ class PotaHunterTUI:
                 self._stop_scan()
                 self._scan_paused_by_activator = True
 
-            # Create centered popup
-            H, W = self.stdscr.getmaxyx()
-            popup_h, popup_w = 18, 52
-            y = max(0, (H - popup_h) // 2)
-            x = max(0, (W - popup_w) // 2)
-            self._activator_popup_win  = curses.newwin(popup_h, popup_w, y, x)
-            park = self.cfg["my_park"]
-            self._activator_popup_form = QSOForm(
-                self._activator_popup_win,
-                title=f" ◈ ACTIVATOR: {park} ")
-            self._activator_popup_form.fields[3].set_value(park)
-
-            self.focus = FOCUS_ACTIVATOR
-            self._set_status(f"ACTIVATOR MODE ON — Park: {park}", "ok")
+            # Rebuild layout: form window moves to center of screen
+            self.stdscr.clear()
+            self.layout()
+            self.focus = FOCUS_FORM
+            self._set_status(
+                f"ACTIVATOR MODE ON — Park: {self.cfg['my_park']}", "ok")
         else:
-            # Tear down popup
-            self._activator_popup_win  = None
-            self._activator_popup_form = None
-
             # Resume scan if it was paused by activator mode
             if self._scan_paused_by_activator:
                 self._scan_paused_by_activator = False
                 self.cmd_toggle_scan()
 
-            if self.w_form:
-                self.w_form.fields[3].set_value("")
+            # Rebuild layout: restore normal window arrangement
+            self.stdscr.clear()
+            self.layout()
             self.focus = FOCUS_SPOTS
             self._set_status("Activator mode OFF — Hunter mode", "info")
 
