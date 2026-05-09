@@ -2140,6 +2140,24 @@ class PotaHunterTUI:
             "SELECT * FROM qso ORDER BY date DESC, time_on DESC LIMIT 200").fetchall()
         self.w_log.set_qsos(qsos)
 
+        # Re-center activator popup if active
+        if self._activator_mode and self._activator_popup_form:
+            popup_h, popup_w = 18, 52
+            y = max(0, (H - popup_h) // 2)
+            x = max(0, (W - popup_w) // 2)
+            self._activator_popup_win = curses.newwin(popup_h, popup_w, y, x)
+            saved_vals = self._activator_popup_form.get_values()
+            park = self.cfg.get("my_park", "")
+            self._activator_popup_form = QSOForm(
+                self._activator_popup_win,
+                title=f" ◈ ACTIVATOR: {park} ")
+            self._activator_popup_form.fields[0].set_value(saved_vals["call"])
+            self._activator_popup_form.fields[1].set_value(saved_vals["rst_sent"])
+            self._activator_popup_form.fields[2].set_value(saved_vals["rst_rcvd"])
+            self._activator_popup_form.fields[3].set_value(saved_vals["park_nr"] or park)
+            self._activator_popup_form.fields[4].set_value(saved_vals["comment"])
+            self._activator_popup_form.fields[5].set_value(saved_vals["notes"])
+
     def _worked_calls(self) -> set:
         rows = self.qso_index.execute("SELECT DISTINCT call FROM qso").fetchall()
         return {r[0].upper() for r in rows}
@@ -2294,7 +2312,12 @@ class PotaHunterTUI:
         if self.w_spots:
             self.w_spots.draw(self.cfg)
         if self.w_form:
-            self.w_form.draw(self.lookup, self.park_info)
+            if self._activator_mode:
+                # Blank the right-side panel so the centered popup stands out
+                self._form_win.erase()
+                self._form_win.noutrefresh()
+            else:
+                self.w_form.draw(self.lookup, self.park_info)
         if self.w_log:
             self.w_log.draw(focused=(self.focus == FOCUS_LOG))
         if self.w_filter:
