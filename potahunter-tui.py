@@ -344,27 +344,12 @@ def flrig_set_ptt(host: str, port: int, state: bool) -> bool:
 
 # ── POTA spots ────────────────────────────────────────────────────────────────
 
-# DXCC entity prefixes by ITU region (subset covering common POTA entities)
-_R2_PREFIXES = {
-    "K","W","KH2","KH3","KH4","KH5","KH6","KH7","KH8","KH9",
-    "KP1","KP2","KP4","KP5","KL","VE","VA","VY","XE",
-    "TI","HP","OA","LU","CE","CX","PY","YV","HC","CP",
-    "VP9","VP2","ZF","FG","FM","FJ","FS","FP","PJ",
-}
-_R3_PREFIXES = {
-    "JA","VK","ZL","HL","BV","HS","XW","XV","YB","DU",
-    "VR","BX","BY","9V","4S","VU","JD1","AX","ZK",
-    "FK","FO","KH0","KH1","T2","T3","V7","YJ",
-}
-
-def _itu_region(reference: str) -> int:
-    """Return 1, 2, or 3 for the ITU region of a POTA park reference."""
-    entity = reference.split("-")[0].rstrip("0123456789").upper()
-    if entity in _R2_PREFIXES:
+def _itu_region_from_lon(lon: float) -> int:
+    if lon <= -30:
         return 2
-    if entity in _R3_PREFIXES:
-        return 3
-    return 1
+    if lon <= 60:
+        return 1
+    return 3
 
 def fetch_pota_spots() -> list:
     url = "https://api.pota.app/spot/activator"
@@ -416,7 +401,11 @@ def filter_spots(spots: list, cfg: dict) -> list:
             except Exception:
                 pass
         if not (r1 and r2 and r3):
-            itu = _itu_region(str(s.get("reference", "")))
+            try:
+                lon = float(s.get("longitude") or s.get("lon") or 0)
+            except (ValueError, TypeError):
+                lon = 0.0
+            itu = _itu_region_from_lon(lon)
             if itu == 1 and not r1:
                 continue
             if itu == 2 and not r2:
