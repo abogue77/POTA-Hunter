@@ -2329,6 +2329,7 @@ class PotaHunterTUI:
     def _dispatch_focus(self, ch: int):
         if self.focus == FOCUS_SPOTS and self.w_spots:
             if ch == ord('\n') or ch == ord('\r'):
+                self._stop_scan()
                 spot = self.w_spots.selected_spot()
                 if spot:
                     self.cmd_tune_to_spot(spot)
@@ -2338,6 +2339,7 @@ class PotaHunterTUI:
                             str(spot.get("activator","") or ""))
                 return
             if ch == curses.KEY_F2:
+                self._stop_scan()
                 spot = self.w_spots.selected_spot()
                 if spot and self.w_form:
                     self.w_form.populate_from_spot(spot)
@@ -2520,6 +2522,12 @@ class PotaHunterTUI:
     def cmd_refresh_spots(self):
         self._set_status("Refreshing spots…", "info")
         self.spot_refresher.trigger_now()
+
+    def _stop_scan(self):
+        if self._scan_enabled:
+            self._scan_enabled = False
+            self.auto_scanner.disable()
+            self._set_status("Auto-scan stopped.", "info")
 
     def cmd_toggle_scan(self):
         self._scan_enabled = not self._scan_enabled
