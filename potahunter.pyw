@@ -410,6 +410,52 @@ def fcc_lookup(call):
     qth  = f"{city}, {state}".strip(", ")
     return {"name": name, "qth": qth, "class": cls, "source": "FCC"}
 
+STATE_CENTROIDS = {
+    "AL": (32.806671,  -86.791130), "AK": (61.370716, -152.404419),
+    "AZ": (33.729759, -111.431221), "AR": (34.969704,  -92.373123),
+    "CA": (36.116203, -119.681564), "CO": (39.059811, -105.311104),
+    "CT": (41.597782,  -72.755371), "DE": (39.318523,  -75.507141),
+    "FL": (27.766279,  -81.686783), "GA": (33.040619,  -83.643074),
+    "HI": (21.094318, -157.498337), "ID": (44.240459, -114.478828),
+    "IL": (40.349457,  -88.986137), "IN": (39.849426,  -86.258278),
+    "IA": (42.011539,  -93.210526), "KS": (38.526600,  -96.726486),
+    "KY": (37.668140,  -84.670067), "LA": (31.169960,  -91.867805),
+    "ME": (44.693947,  -69.381927), "MD": (39.063946,  -76.802101),
+    "MA": (42.230171,  -71.530106), "MI": (43.326618,  -84.536095),
+    "MN": (45.694454,  -93.900192), "MS": (32.741646,  -89.678696),
+    "MO": (38.456085,  -92.288368), "MT": (46.921925, -110.454353),
+    "NE": (41.125370,  -98.268082), "NV": (38.313515, -117.055374),
+    "NH": (43.452492,  -71.563896), "NJ": (40.298904,  -74.521011),
+    "NM": (34.840515, -106.248482), "NY": (42.165726,  -74.948051),
+    "NC": (35.630066,  -79.806419), "ND": (47.528912,  -99.784012),
+    "OH": (40.388783,  -82.764915), "OK": (35.565342,  -96.928917),
+    "OR": (44.572021, -122.070938), "PA": (40.590752,  -77.209755),
+    "RI": (41.680893,  -71.511780), "SC": (33.856892,  -80.945007),
+    "SD": (44.299782,  -99.438828), "TN": (35.747845,  -86.692345),
+    "TX": (31.054487,  -97.563461), "UT": (40.150032, -111.862434),
+    "VT": (44.045876,  -72.710686), "VA": (37.769337,  -78.169968),
+    "WA": (47.400902, -121.490494), "WV": (38.491226,  -80.954453),
+    "WI": (44.268543,  -89.616508), "WY": (42.755966, -107.302490),
+    "DC": (38.897438,  -77.026817), "PR": (18.220833,  -66.590149),
+    "GU": (13.444304,  144.793731), "VI": (18.335765,  -64.896335),
+    "AS": (-14.270972, -170.132217), "MP": (15.097847,  145.673508),
+}
+
+def spotter_latlon(call):
+    """Return (lat, lon) state centroid for a callsign via FCC DB, or None."""
+    if not call or not os.path.exists(FCC_DB):
+        return None
+    try:
+        with sqlite3.connect(FCC_DB) as cx:
+            row = cx.execute(
+                "SELECT state FROM callsigns WHERE call=?",
+                (call.upper(),)).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return STATE_CENTROIDS.get((row[0] or "").strip().upper()[:2])
+
 # ── ADIF helpers ──────────────────────────────────────────────────────────────
 def adif_field(tag, val):
     if val is None or str(val).strip() == "":
@@ -2279,6 +2325,10 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
 #radar-btn{cursor:pointer;font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:2px;padding:4px 12px;border:1px solid currentColor;transition:all .2s;user-select:none;margin-left:8px;}
 #radar-btn.off{color:var(--dim);border-color:var(--dim);}
 #radar-btn.on{color:var(--cyan);border-color:var(--cyan);text-shadow:0 0 8px rgba(0,229,255,.7);}
+#spotter-btn{cursor:pointer;font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:2px;padding:4px 12px;border:1px solid currentColor;transition:all .2s;user-select:none;margin-left:8px;}
+#spotter-btn.off{color:var(--dim);border-color:var(--dim);}
+#spotter-btn.on{color:var(--cyan);border-color:var(--cyan);text-shadow:0 0 8px rgba(0,229,255,.7);}
+.day-mode #spotter-btn.on{text-shadow:none;}
 #log-modal-overlay{position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.82);
   display:none;align-items:center;justify-content:center;}
 #log-modal{background:var(--panel);border:1px solid var(--cyan);padding:22px 26px;width:340px;
@@ -2405,6 +2455,7 @@ header::after{content:'';position:absolute;inset:0;pointer-events:none;backgroun
   <div style="display:flex;align-items:center;gap:0;">
     <div id="scan-btn" class="paused">⏸ SCAN PAUSED</div>
     <div id="radar-btn" class="off">◎ RADAR OFF</div>
+    <div id="spotter-btn" class="off" onclick="toggleSpotterLine()">&#8594; SPOTTER OFF</div>
     <button id="theme-btn" onclick="toggleMapTheme()">&#9788; DAY</button>
   </div>
 </header>
@@ -2496,6 +2547,9 @@ function _applyMapTheme(){
     btn.textContent='☀ DAY';
     _tileLayer.setUrl('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');}}
 _applyMapTheme();
+(function(){var sb=document.getElementById('spotter-btn');
+  if(_showSpotterLine){sb.className='on';sb.innerHTML='&#8594; SPOTTER ON';}
+  else{sb.className='off';sb.innerHTML='&#8594; SPOTTER OFF';}})();
 var radarLayer=null,radarEnabled=false,radarRefreshTimer=null;
 var RADAR_OPACITY=0.5;
 function buildRadarUrl(host,path){return host+path+'/256/{z}/{x}/{y}/6/1_1.png';}
@@ -2530,7 +2584,22 @@ function disableRadar(){
   if(radarRefreshTimer){clearInterval(radarRefreshTimer);radarRefreshTimer=null;}
   if(radarLayer){map.removeLayer(radarLayer);radarLayer=null;}
   var btn=document.getElementById('radar-btn');btn.className='off';btn.textContent='◎ RADAR OFF';}
-var markers=[],beamLines=[],_tunedSpot=null,_tunedCardSpot=null,_activatorMode=false,_lastPark='',_flrigFreqKhz=null,_flrigMode=null,_pinnedTuned=null;
+var markers=[],beamLines=[],_tunedSpot=null,_tunedCardSpot=null,_activatorMode=false,_lastPark='',_flrigFreqKhz=null,_flrigMode=null,_pinnedTuned=null,spotterLine=null;
+var _showSpotterLine=(localStorage.getItem('spotterLine')!=='off');
+function toggleSpotterLine(){
+  _showSpotterLine=!_showSpotterLine;
+  localStorage.setItem('spotterLine',_showSpotterLine?'on':'off');
+  var btn=document.getElementById('spotter-btn');
+  if(_showSpotterLine){btn.className='on';btn.innerHTML='&#8594; SPOTTER ON';}
+  else{btn.className='off';btn.innerHTML='&#8594; SPOTTER OFF';fadeAndRemoveSpotterLine();}}
+function fadeAndRemoveSpotterLine(){
+  if(!spotterLine)return;
+  var op=0.30,old=spotterLine;spotterLine=null;
+  var fade=setInterval(function(){
+    op-=0.05;
+    if(op<=0){clearInterval(fade);map.removeLayer(old);}
+    else{old.setStyle({opacity:op});}
+  },60);}
 var BAND_COLORS={'160m':'#ff4444','80m':'#ff8800','60m':'#ffcc00','40m':'#aaff00',
   '30m':'#00ffaa','20m':'#00e5ff','17m':'#0088ff','15m':'#8844ff',
   '12m':'#ff44cc','10m':'#ff2288','6m':'#ff0055','2m':'#ff6688','other':'#aaaaaa'};
@@ -2546,7 +2615,8 @@ function freqToBand(k){
   return 'other';}
 function clearMarkers(){
   markers.forEach(function(m){map.removeLayer(m);});markers=[];
-  beamLines.forEach(function(l){map.removeLayer(l);});beamLines=[];}
+  beamLines.forEach(function(l){map.removeLayer(l);});beamLines=[];
+  if(spotterLine){map.removeLayer(spotterLine);spotterLine=null;}}
 function showTunedCard(s){
   var tsBox=document.getElementById('tuned-station-box');
   var tsEmpty=document.getElementById('ts-empty');
@@ -2667,6 +2737,15 @@ function refreshData(){
         var gcp=gcPoints(d.my_grid.lat,d.my_grid.lon,ts.lat,ts.lon,60);
         var bl=L.polyline(gcp,{color:'#00e5ff',weight:2.5,dashArray:'12 8',opacity:0.85,className:'beam-anim'});
         bl.addTo(map);beamLines.push(bl);});}
+    var tunedWithSpotter=_showSpotterLine?(d.tuned_spots||[]).find(function(ts){return ts.spotter_lat!=null&&ts.spotter_lon!=null;}):null;
+    if(tunedWithSpotter){
+      if(!spotterLine||spotterLine._spotterCall!==tunedWithSpotter.spotter){
+        fadeAndRemoveSpotterLine();
+        var sgcp=gcPoints(tunedWithSpotter.spotter_lat,tunedWithSpotter.spotter_lon,tunedWithSpotter.lat,tunedWithSpotter.lon,60);
+        spotterLine=L.polyline(sgcp,{color:'#00e5ff',weight:1.5,dashArray:'8 10',opacity:0.30});
+        spotterLine._spotterCall=tunedWithSpotter.spotter;
+        spotterLine.addTo(map);}
+    }else{fadeAndRemoveSpotterLine();}
     updateStatsPanel(d);
     updateSpotsPanel(d);
     var sb=document.getElementById('scan-btn');
@@ -3153,12 +3232,14 @@ function clearLogModal(){
                         worked = activator in worked_calls
                         mode = str(s.get("mode", "")).strip()
                         park_name = str(s.get("name", s.get("parkName", ""))).strip()
+                        spotter = str(s.get("spotter", "")).strip().upper()
                         spots_out.append({
                             "gs": gs, "activator": activator, "park": park,
                             "park_name": park_name, "freq_khz": freq_khz, "mode": mode,
                             "tuned": tuned, "worked": worked,
                             "lat": lat, "lon": lon,
                             "spot_time": str(s.get("spotTime", s.get("timestamp", ""))),
+                            "spotter": spotter,
                         })
                     my_grid_data = None
                     tuned_spots = []
@@ -3169,11 +3250,16 @@ function clearLogModal(){
                             my_grid_data = {"gs": my_gs, "lat": mlat, "lon": mlon}
                     for sp in spots_out:
                         if sp["tuned"]:
+                            spotter_call = sp.get("spotter", "")
+                            spotter_pos = spotter_latlon(spotter_call) if spotter_call else None
                             tuned_spots.append({
                                 "lat": sp["lat"], "lon": sp["lon"],
                                 "activator": sp["activator"], "park": sp["park"],
                                 "park_name": sp["park_name"], "gs": sp["gs"],
                                 "freq_khz": sp["freq_khz"], "mode": sp["mode"],
+                                "spotter": spotter_call,
+                                "spotter_lat": spotter_pos[0] if spotter_pos else None,
+                                "spotter_lon": spotter_pos[1] if spotter_pos else None,
                             })
                     # Build QSO markers from logged contacts
                     qsos_out = []
