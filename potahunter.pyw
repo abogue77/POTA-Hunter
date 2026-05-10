@@ -4833,8 +4833,13 @@ function clearLogModal(){
         }
         def _on_press(key):
             label = _fkey_map.get(key)
-            if label and self._vk_window and self._vk_window.winfo_exists():
-                self.after(0, lambda k=label: self._vk_window.play(k))
+            if label:
+                def _trigger(k=label):
+                    if not (self._vk_window and self._vk_window.winfo_exists()):
+                        self._open_voice_keyer()
+                    if self._vk_window:
+                        self._vk_window.play(k)
+                self.after(0, _trigger)
         try:
             listener = _pynput_kb.Listener(on_press=_on_press)
             listener.daemon = True
@@ -5070,7 +5075,7 @@ class VoiceKeyerWindow(tk.Toplevel):
 
     def _record_thread(self, key):
         path = self._wav_path(key)
-        samplerate = 44100
+        samplerate = 48000
         dev = self._resolve_device("vk_input_device", input=True)
         frames = []
         try:
@@ -5144,9 +5149,27 @@ class VoiceKeyerWindow(tk.Toplevel):
             audio = np.frombuffer(raw, dtype=dtype)
             if ch > 1:
                 audio = audio.reshape(-1, ch)
+            # Resample if the WAV rate doesn't match the device's native rate
+            # (e.g. old 44100 Hz recordings played on a 48000 Hz USB device like Digirig)
+            if dev is not None:
+                try:
+                    device_rate = int(sd.query_devices(dev)["default_samplerate"])
+                    if device_rate != rate:
+                        flat = audio.flatten() if audio.ndim > 1 else audio
+                        n_out = int(len(flat) * device_rate / rate)
+                        resampled = np.interp(
+                            np.linspace(0, len(flat) - 1, n_out),
+                            np.arange(len(flat)),
+                            flat.astype(np.float64),
+                        ).astype(dtype)
+                        audio = resampled.reshape(-1, ch) if ch > 1 else resampled
+                        rate = device_rate
+                except Exception:
+                    pass
             sd.play(audio, samplerate=rate, device=dev, blocking=True)
         except Exception as exc:
-            self.after(0, lambda: self._set_status(f"Play error: {exc}", WARN))
+            self.after(0, lambda e=exc: messagebox.showerror(
+                "Playback Error", str(e), parent=self))
         finally:
             if ptt_en:
                 flrig_set_ptt(host, port, False)
