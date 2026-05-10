@@ -5076,7 +5076,7 @@ class VoiceKeyerWindow(tk.Toplevel):
     def _record_thread(self, key):
         path = self._wav_path(key)
         samplerate = 48000
-        dev = self._resolve_device("vk_input_device", input=True)
+        dev, _dev_name, _cfg = self._resolve_device("vk_input_device", input=True)
         frames = []
         try:
             with sd.InputStream(samplerate=samplerate, channels=1,
@@ -5134,7 +5134,19 @@ class VoiceKeyerWindow(tk.Toplevel):
         port    = self._app.cfg.get("flrig_port", 12345)
         ptt_en  = self._app.cfg.get("vk_ptt_enabled", False)
         delay   = self._app.cfg.get("vk_ptt_delay_ms", 200) / 1000.0
-        dev     = self._resolve_device("vk_output_device", input=False)
+        dev, dev_name, cfg_name = self._resolve_device("vk_output_device", input=False)
+
+        # Warn if a device was configured but couldn't be found
+        if cfg_name and dev is None:
+            self.after(0, lambda: messagebox.showwarning(
+                "Audio Device Not Found",
+                f"Output device \"{cfg_name}\" was not found.\n"
+                "Audio will play through the default device (speakers).\n\n"
+                "Check Voice Keyer Settings and re-select your device.",
+                parent=self))
+
+        label = dev_name or "default (speakers)"
+        self.after(0, lambda lbl=label: self._set_status(f"TX {key} → {lbl}", ACC3))
 
         if ptt_en:
             flrig_set_ptt(host, port, True)
@@ -5149,8 +5161,8 @@ class VoiceKeyerWindow(tk.Toplevel):
             audio = np.frombuffer(raw, dtype=dtype)
             if ch > 1:
                 audio = audio.reshape(-1, ch)
-            # Resample if the WAV rate doesn't match the device's native rate
-            # (e.g. old 44100 Hz recordings played on a 48000 Hz USB device like Digirig)
+            # Resample if WAV rate doesn't match device's native rate
+            # (e.g. old 44100 Hz recordings on a 48000 Hz USB device like Digirig)
             if dev is not None:
                 try:
                     device_rate = int(sd.query_devices(dev)["default_samplerate"])
@@ -5203,17 +5215,24 @@ class VoiceKeyerWindow(tk.Toplevel):
 
     # ── device resolution ──────────────────────────────────────────────────
     def _resolve_device(self, cfg_key, input=True):
-        name = self._app.cfg.get(cfg_key, "")
-        if not name or not _AUDIO_OK:
-            return None
+        """Return (device_index_or_None, resolved_name_or_None, configured_name)."""
+        cfg_name = self._app.cfg.get(cfg_key, "")
+        if not cfg_name or not _AUDIO_OK:
+            return None, None, cfg_name
         try:
             key_ch = "max_input_channels" if input else "max_output_channels"
-            for i, d in enumerate(sd.query_devices()):
-                if d["name"] == name and d[key_ch] > 0:
-                    return i
+            devices = list(sd.query_devices())
+            # Exact match first
+            for i, d in enumerate(devices):
+                if d["name"] == cfg_name and d[key_ch] > 0:
+                    return i, d["name"], cfg_name
+            # Substring fallback — handles PortAudio name truncation on Windows
+            for i, d in enumerate(devices):
+                if (cfg_name in d["name"] or d["name"] in cfg_name) and d[key_ch] > 0:
+                    return i, d["name"], cfg_name
         except Exception:
             pass
-        return None
+        return None, None, cfg_name
 
     # ── settings ───────────────────────────────────────────────────────────
     def _open_settings(self):
