@@ -2996,7 +2996,12 @@ setInterval(refreshData,2000);
 map.on('click',function(){fetch('/scan',{method:'POST'});});
 document.getElementById('scan-btn').addEventListener('click',function(e){e.stopPropagation();fetch('/scan',{method:'POST'});});
 document.getElementById('radar-btn').addEventListener('click',function(e){e.stopPropagation();if(radarEnabled){disableRadar();}else{enableRadar();}});
-document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLogModal();}});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){closeLogModal();}
+  // Absorb F1-F9 so the browser doesn't act on them (help, refresh, etc.)
+  // POTA Hunter's global pynput listener still fires independently.
+  if(/^F[1-9]$/.test(e.key)){e.preventDefault();}
+});
 document.addEventListener('click',function(e){if(e.target.id==='log-modal-overlay'){closeLogModal();}});
 function lmLookupCall(call){
   if(!call)return;
