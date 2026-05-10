@@ -21,6 +21,7 @@ import io
 import re
 import pathlib
 import dataclasses
+import os
 import subprocess
 import sys
 import urllib.request
@@ -1537,7 +1538,9 @@ class QSOForm:
         if ch == 27:  # Esc
             return "clear"
         if ch == ord('\t') or ch == curses.KEY_DOWN:
-            self.focus_idx = (self.focus_idx + 1) % len(self.fields)
+            if self.focus_idx == len(self.fields) - 1:
+                return "next-panel"
+            self.focus_idx += 1
             return None
         if ch == curses.KEY_BTAB or ch == curses.KEY_UP:
             self.focus_idx = (self.focus_idx - 1) % len(self.fields)
@@ -1747,8 +1750,8 @@ class FilterBar:
 
 
 class HelpBar:
-    TEXT = ("F1:Focus  F2:Log  F3:Tune  F4:Respot  F5:Refresh  F6:Scan  "
-            "F7:Logbook  F8:PostSpot  F9:Config  F10:DBTools  F12:ActMode  ?:Help  q:Quit")
+    TEXT = ("F1/Tab:Focus  F2:Log  F3:Tune  F4:Respot  F5/5:Refresh  F6/6:Scan  "
+            "F7/7:Logbook  F8/8:PostSpot  F9/9:Config  F10/0:DBTools  F12/`:ActMode  ?:Help  q:Quit")
 
     def __init__(self, win):
         self.win = win
@@ -2022,8 +2025,10 @@ class ModalDialog:
             "F10         Database tools (build Parks / FCC callsign DB)",
             "F12         Toggle Activator mode (locks park, rapid logging)",
             "F1          Cycle focus: form → spots → log → form",
-            "Tab/Down    Next field in QSO form",
+            "Tab         Cycle focus (spots → log → form); next field inside form",
+            "              Tab from last form field exits back to spots",
             "Shift-Tab/Up  Previous field in QSO form",
+            "5/6/7/8/9/0/`  Alt for F5-F10/F12 (use when F-keys unavailable, e.g. Byobu)",
             "Enter       (spot list) Tune + fill form",
             "Arrow keys  Navigate spot list or QSO log",
             "PgUp/PgDn   Scroll by 10 / 5 rows",
@@ -2405,6 +2410,18 @@ class PotaHunterTUI:
             self.cmd_toggle_activator_mode(); return True
         if ch == curses.KEY_F1:
             self._cycle_focus(forward=True); return True
+        if ch == ord('\t') and self.focus != FOCUS_FORM:
+            self._cycle_focus(forward=True); return True
+        # Number-key alternatives for Linux/Byobu/Fn-lock where F-keys are unavailable
+        # Only global action keys (5-9, 0, `) — no focus/navigation to avoid form-entry trap
+        if self.focus != FOCUS_FORM:
+            if ch == ord('5'): self.cmd_refresh_spots(); return True
+            if ch == ord('6'): self.cmd_toggle_scan(); return True
+            if ch == ord('7'): self.cmd_logbook_menu(); return True
+            if ch == ord('8'): self.cmd_post_my_spot(); return True
+            if ch == ord('9'): self.cmd_config(); return True
+            if ch == ord('0'): self.cmd_db_tools(); return True
+            if ch == ord('`'): self.cmd_toggle_activator_mode(); return True
         if ch == ord('?') and self.focus != FOCUS_FORM:
             ModalDialog.help_overlay(self.stdscr); return True
         if ch == 18:  # Ctrl-R
@@ -2832,6 +2849,11 @@ class PotaHunterTUI:
 def main():
     cfg = load_config()
     _fkey_grabbed = _disable_gnome_fkey_grab()
+
+    if sys.platform == "linux" and (os.environ.get("BYOBU_BACKEND") or os.environ.get("BYOBU_VERSION")):
+        print("NOTE: Byobu detected — F-keys are intercepted by Byobu.", file=sys.stderr)
+        print("      Run 'byobu-disable' and restart for full F-key support, or use:", file=sys.stderr)
+        print("      Tab=Focus  5=Refresh  6=Scan  7=Logbook  8=PostSpot  9=Config  0=DBTools  `=ActMode", file=sys.stderr)
 
     # Attempt QRZ login in background if credentials exist
     if cfg.get("qrz_user") and cfg.get("qrz_pass"):
