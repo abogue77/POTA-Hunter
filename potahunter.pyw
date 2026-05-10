@@ -4821,6 +4821,68 @@ function clearLogModal(){
             return
         self._vk_window = VoiceKeyerWindow(self)
 
+    def _vk_play_headless(self, key):
+        """Play a voice keyer slot via hotkey without opening the window."""
+        if not _AUDIO_OK:
+            return
+        path = os.path.join(self._vk_dir, f"{key}.wav")
+        if not os.path.exists(path):
+            return
+        threading.Thread(target=self._vk_headless_thread,
+                         args=(key, path), daemon=True).start()
+
+    def _vk_headless_thread(self, key, path):
+        host   = self.cfg.get("flrig_host", "127.0.0.1")
+        port   = self.cfg.get("flrig_port", 12345)
+        ptt_en = self.cfg.get("vk_ptt_enabled", False)
+        delay  = self.cfg.get("vk_ptt_delay_ms", 200) / 1000.0
+        dev_name = self.cfg.get("vk_output_device", "")
+        dev = None
+        if dev_name and _AUDIO_OK:
+            try:
+                for i, d in enumerate(sd.query_devices()):
+                    if (d["name"] == dev_name or dev_name in d["name"] or
+                            d["name"] in dev_name) and d["max_output_channels"] > 0:
+                        dev = i
+                        break
+            except Exception:
+                pass
+        if ptt_en:
+            flrig_set_ptt(host, port, True)
+            time.sleep(delay)
+        try:
+            with wave.open(path) as wf:
+                raw  = wf.readframes(wf.getnframes())
+                rate = wf.getframerate()
+                ch   = wf.getnchannels()
+                sw   = wf.getsampwidth()
+            dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sw, np.int16)
+            audio = np.frombuffer(raw, dtype=dtype)
+            if ch > 1:
+                audio = audio.reshape(-1, ch)
+            if dev is not None:
+                try:
+                    device_rate = int(sd.query_devices(dev)["default_samplerate"])
+                    if device_rate != rate:
+                        flat  = audio.flatten() if audio.ndim > 1 else audio
+                        n_out = int(len(flat) * device_rate / rate)
+                        audio = np.interp(
+                            np.linspace(0, len(flat) - 1, n_out),
+                            np.arange(len(flat)),
+                            flat.astype(np.float64),
+                        ).astype(dtype)
+                        if ch > 1:
+                            audio = audio.reshape(-1, ch)
+                        rate = device_rate
+                except Exception:
+                    pass
+            sd.play(audio, samplerate=rate, device=dev, blocking=True)
+        except Exception:
+            pass
+        finally:
+            if ptt_en:
+                flrig_set_ptt(host, port, False)
+
     def _start_vk_hotkey_listener(self):
         if not _PYNPUT_OK:
             return
@@ -4835,10 +4897,10 @@ function clearLogModal(){
             label = _fkey_map.get(key)
             if label:
                 def _trigger(k=label):
-                    if not (self._vk_window and self._vk_window.winfo_exists()):
-                        self._open_voice_keyer()
-                    if self._vk_window:
+                    if self._vk_window and self._vk_window.winfo_exists():
                         self._vk_window.play(k)
+                    else:
+                        self._vk_play_headless(k)
                 self.after(0, _trigger)
         try:
             listener = _pynput_kb.Listener(on_press=_on_press)
