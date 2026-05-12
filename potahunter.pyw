@@ -2530,18 +2530,24 @@ var _tileLayer=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{
   attribution:'&copy; OpenStreetMap contributors &copy; CARTO',
   subdomains:'abcd',maxZoom:19});
 _tileLayer.addTo(map);
-var _dayMode=(localStorage.getItem('mapTheme')==='day');
+var _mapTheme=(localStorage.getItem('mapTheme')||'night');
 function toggleMapTheme(){
-  _dayMode=!_dayMode;
-  localStorage.setItem('mapTheme',_dayMode?'day':'night');
+  if(_mapTheme==='night')_mapTheme='day';
+  else if(_mapTheme==='day')_mapTheme='terrain';
+  else _mapTheme='night';
+  localStorage.setItem('mapTheme',_mapTheme);
   _applyMapTheme();}
 function _applyMapTheme(){
   var root=document.documentElement;
   var btn=document.getElementById('theme-btn');
-  if(_dayMode){
+  if(_mapTheme==='day'){
+    root.classList.add('day-mode');
+    btn.textContent='⛰ TOPO';
+    _tileLayer.setUrl('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png');
+  }else if(_mapTheme==='terrain'){
     root.classList.add('day-mode');
     btn.textContent='☽ NIGHT';
-    _tileLayer.setUrl('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png');
+    _tileLayer.setUrl('https://tile.opentopomap.org/{z}/{x}/{y}.png');
   }else{
     root.classList.remove('day-mode');
     btn.textContent='☀ DAY';
@@ -2640,7 +2646,7 @@ function updateStatsPanel(d){
   var keys=Object.keys(bc),bandsEl=document.getElementById('stat-bands');
   if(!keys.length){bandsEl.innerHTML='<div style="color:var(--dim);font-size:.6rem;letter-spacing:2px">NO SPOTS</div>';}
   else{bandsEl.innerHTML=keys.sort().map(function(b){
-    var c=(_dayMode?BAND_COLORS_DAY:BAND_COLORS)[b]||(_dayMode?'#555':'#aaa');
+    var c=(_mapTheme!=='night'?BAND_COLORS_DAY:BAND_COLORS)[b]||(_mapTheme!=='night'?'#555':'#aaa');
     return '<div class="chip" style="border-color:'+c+';color:'+c+'"><strong>'+bc[b]+'</strong> '+b+'</div>';
   }).join('');}
   var llBox=document.getElementById('last-logged-box');
@@ -2674,7 +2680,7 @@ function updateSpotsPanel(d){
     var badge=s.tuned?'<span class="spot-badge tuned">&#9679; TUNED</span>'
       :s.worked?'<span class="spot-badge worked">&#10003; WORKED</span>':'';
     var mhz=s.freq_khz?(s.freq_khz/1000).toFixed(3)+' MHz':'?';
-    var band=freqToBand(s.freq_khz),bc=(_dayMode?BAND_COLORS_DAY:BAND_COLORS)[band]||(_dayMode?'#555':'#aaa');
+    var band=freqToBand(s.freq_khz),bc=(_mapTheme!=='night'?BAND_COLORS_DAY:BAND_COLORS)[band]||(_mapTheme!=='night'?'#555':'#aaa');
     return '<div class="spot-item '+cls+'" data-i="'+i+'">'
       +'<div class="spot-call"><span>'+s.activator+'</span>'+badge+'</div>'
       +'<div class="spot-meta"><span class="spot-park">'+(s.park||'?')+'</span>'
@@ -2708,15 +2714,16 @@ function refreshData(){
       if(q.band||q.mode)pop+='<br>'+[q.band,q.mode].filter(Boolean).join(' ');
       if(q.date)pop+='<br>'+q.date+' '+q.time_on+'z';
       m.bindPopup(pop);m.addTo(map);markers.push(m);});
+    var tunedColor=_mapTheme==='night'?'#00e5ff':'#000000';
     (d.spots||[]).forEach(function(s){
-      var color=s.tuned?'#00e5ff':s.worked?'#00bb44':(_dayMode?'#000000':'#ffff00');
+      var color=s.tuned?tunedColor:s.worked?'#00bb44':(_mapTheme!=='night'?'#000000':'#ffff00');
       var r=s.tuned?7:5;
       var cls=(!s.tuned&&!s.worked)?'spot-flash':'';
       var m=L.circleMarker([s.lat,s.lon],{radius:r,color:color,fillColor:color,fillOpacity:0.85,weight:s.tuned?2:1,className:cls});
       var pop=s.activator+' ['+s.park+']<br>'+s.freq_khz+' kHz '+s.mode;
       if(s.tuned)pop+='<br><b>&#x25CF; TUNED</b>';
       if(s.worked)pop+='<br><b>Worked</b>';
-      if(s.tuned)pop+='<br><button onclick="openLogModal(_tunedSpot)" style="margin-top:4px;font-size:.55rem;letter-spacing:2px;padding:3px 10px;border:1px solid #00e5ff;color:#00e5ff;background:transparent;cursor:pointer;">&#9998; LOG QSO</button>';
+      if(s.tuned)pop+='<br><button onclick="openLogModal(_tunedSpot)" style="margin-top:4px;font-size:.55rem;letter-spacing:2px;padding:3px 10px;border:1px solid '+tunedColor+';color:'+tunedColor+';background:transparent;cursor:pointer;">&#9998; LOG QSO</button>';
       m.bindPopup(pop);
       m.on('click',function(e){
         L.DomEvent.stopPropagation(e);
@@ -2735,14 +2742,14 @@ function refreshData(){
     if(d.my_grid&&d.tuned_spots&&d.tuned_spots.length){
       d.tuned_spots.forEach(function(ts){
         var gcp=gcPoints(d.my_grid.lat,d.my_grid.lon,ts.lat,ts.lon,60);
-        var bl=L.polyline(gcp,{color:'#00e5ff',weight:2.5,dashArray:'12 8',opacity:0.85,className:'beam-anim'});
+        var bl=L.polyline(gcp,{color:tunedColor,weight:2.5,dashArray:'12 8',opacity:0.85,className:'beam-anim'});
         bl.addTo(map);beamLines.push(bl);});}
     var tunedWithSpotter=_showSpotterLine?(d.tuned_spots||[]).find(function(ts){return ts.spotter_lat!=null&&ts.spotter_lon!=null;}):null;
     if(tunedWithSpotter){
       if(!spotterLine||spotterLine._spotterCall!==tunedWithSpotter.spotter){
         fadeAndRemoveSpotterLine();
         var sgcp=gcPoints(tunedWithSpotter.spotter_lat,tunedWithSpotter.spotter_lon,tunedWithSpotter.lat,tunedWithSpotter.lon,60);
-        spotterLine=L.polyline(sgcp,{color:'#00e5ff',weight:1.5,dashArray:'8 10',opacity:0.30});
+        spotterLine=L.polyline(sgcp,{color:tunedColor,weight:1.5,dashArray:'8 10',opacity:0.30});
         spotterLine._spotterCall=tunedWithSpotter.spotter;
         spotterLine.addTo(map);}
     }else{fadeAndRemoveSpotterLine();}
